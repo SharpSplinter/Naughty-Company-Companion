@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.0.3
+// @version      1.0.4
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.0.3";
+    const VERSION = "1.0.4";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -67,7 +67,7 @@
         status: "Configure a Torn API key to begin.",
         error: "",
         selectedTab: "overview",
-        sort: { team: { key: "total", dir: "desc" }, rankings: { key: "rank", dir: "asc" }, stock: { key: "sold_worth", dir: "desc" } },
+        sort: { team: { key: "total", dir: "desc" }, planner: { key: "name", dir: "asc" }, rankings: { key: "rank", dir: "asc" }, stock: { key: "sold_worth", dir: "desc" } },
         teamFilter: "",
         rankingsFilter: "",
         modal: null,
@@ -970,14 +970,15 @@
         const settings = currentCompanySettings();
         const assignments = calculateAssignmentPreview(rows, settings);
         const capacityRows = positions.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Position</th><th>Max qty</th><th>Priority</th><th>Occupied</th></tr></thead><tbody>${positions.map((position, index) => `<tr><td><b>${escapeHtml(position)}</b></td><td><input class="ncc-input" data-capacity="${escapeHtml(position)}" type="number" min="0" step="1" value="${asNumber(settings.capacities[position]) || ""}" placeholder="Uncapped"></td><td><input class="ncc-input" data-priority="${escapeHtml(position)}" type="number" min="1" step="1" value="${priorityNumber(position, settings.priority, index)}"></td><td>${formatNumber(assignments.occupied[position] || 0)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice warn">Load per-employee TornStats projections first. Position names are intentionally discovered from the matching company-type response rather than hard-coded.</div>`;
-        const rowsTable = rows.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Employee</th><th>Current</th><th>Assigned</th><th>Current eff.</th><th>Assigned eff.</th><th>Change</th><th>Lock</th></tr></thead><tbody>${rows.map((row) => {
+        const previewRows = sortRows(rows.map((row) => {
             const hasSavedAssignment = Object.prototype.hasOwnProperty.call(settings.assignments || {}, row.id);
             const assigned = hasSavedAssignment ? settings.assignments[row.id] : row.currentPosition;
             const base = row.projected?.[assigned];
             const projected = base === undefined ? null : asNumber(base) + row.nonWorkingDelta;
             const change = projected === null || row.currentEfficiency === null ? null : projected - row.currentEfficiency;
-            return `<tr class="${assigned !== row.currentPosition ? "ncc-misplaced" : ""}"><td><b>${escapeHtml(row.name)}</b></td><td>${escapeHtml(row.currentPosition || "—")}</td><td>${escapeHtml(assigned || "Unassigned")}</td><td>${formatOptionalNumber(row.currentEfficiency, 1)}</td><td class="${change !== null && change > 0 ? "ncc-good" : change !== null && change < 0 ? "ncc-bad" : ""}">${formatOptionalNumber(projected, 1)}</td><td>${formatSignedNumber(change)}</td><td>${row.locked ? "Locked" : "Flexible"}</td></tr>`;
-        }).join("")}</tbody></table></div>` : "";
+            return { ...row, previewAssigned: assigned, previewEfficiency: projected, previewChange: change };
+        }), { key: (row) => ({ name: row.name, current: row.currentPosition, assigned: row.previewAssigned, currentEfficiency: row.currentEfficiency, assignedEfficiency: row.previewEfficiency, change: row.previewChange, lock: row.locked ? 1 : 0 }[state.sort.planner.key]), dir: state.sort.planner.dir });
+        const rowsTable = previewRows.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr>${sortHeader("Employee", "name", "planner")}${sortHeader("Current", "current", "planner")}${sortHeader("Assigned", "assigned", "planner")}${sortHeader("Current eff.", "currentEfficiency", "planner")}${sortHeader("Assigned eff.", "assignedEfficiency", "planner")}${sortHeader("Change", "change", "planner")}${sortHeader("Lock", "lock", "planner")}</tr></thead><tbody>${previewRows.map((row) => `<tr class="${row.previewAssigned !== row.currentPosition ? "ncc-misplaced" : ""}"><td><b>${escapeHtml(row.name)}</b></td><td>${escapeHtml(row.currentPosition || "—")}</td><td>${escapeHtml(row.previewAssigned || "Unassigned")}</td><td>${formatOptionalNumber(row.currentEfficiency, 1)}</td><td class="${row.previewChange !== null && row.previewChange > 0 ? "ncc-good" : row.previewChange !== null && row.previewChange < 0 ? "ncc-bad" : ""}">${formatOptionalNumber(row.previewEfficiency, 1)}</td><td>${formatSignedNumber(row.previewChange)}</td><td>${row.locked ? "Locked" : "Flexible"}</td></tr>`).join("")}</tbody></table></div>` : "";
         const warnings = assignments.lockedOverages.map(([position, used]) => `${formatNumber(used)} locked employees exceed ${escapeHtml(position)}’s maximum.`).join(" ");
         return `${dataNotice()}<div class="ncc-toolbar"><button class="ncc-button" data-action="save-planner" ${positions.length ? "" : "disabled"}>Save role capacity & priority</button><button class="ncc-button ncc-primary" data-action="auto-assign" ${positions.length ? "" : "disabled"}>Auto-assign unlocked staff</button><button class="ncc-button" data-action="load-projections" title="Refreshes TornStats role-efficiency choices for every employee after consent" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating…" : "Refresh TornStats role projections"}</button><span class="ncc-help">0 or blank max qty = uncapped. Lower priority number fills first.</span></div>${section("Position capacity & priority", capacityRows)}${warnings ? `<div class="ncc-notice warn">${warnings}</div>` : ""}${section("Assignment preview", rowsTable)}<p class="ncc-note">Auto assignment keeps locked employees in their current seats, then greedily fills positions by priority with the highest remaining base efficiency while respecting configured role caps and total company capacity. It only saves a local plan.</p>`;
     }
@@ -1397,7 +1398,7 @@
         window.addEventListener("beforeunload", () => { void persistLayout(); });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, preferredCurrentEfficiency };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, preferredCurrentEfficiency, sortRows };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof document !== "undefined" && typeof window !== "undefined") {
         if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { void boot(); }, { once: true });

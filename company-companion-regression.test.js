@@ -111,3 +111,13 @@ test("current effectiveness combines TornStats role base with Torn non-working e
     assert.equal(companion.preferredCurrentEfficiency(130, 102, 26), 128);
     assert.equal(companion.preferredCurrentEfficiency(130, undefined, 26), 130);
 });
+
+test("assignment preview values sort through the shared table sorter", () => {
+    const rows = [
+        { name: "B", current: 130, assigned: 128, change: -2, lock: 0 },
+        { name: "A", current: 128, assigned: 131, change: 3, lock: 1 }
+    ];
+
+    assert.deepEqual(companion.sortRows(rows, { key: "change", dir: "asc" }).map((row) => row.name), ["B", "A"]);
+    assert.deepEqual(companion.sortRows(rows, { key: "name", dir: "asc" }).map((row) => row.name), ["A", "B"]);
+});
