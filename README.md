@@ -1,47 +1,88 @@
 # Naughty Company Companion
 
-Tampermonkey and TornPDA userscript for Torn company directors.
+Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn company directors and managers. It brings revenue, net estimates, staffing efficiency, TornStats-based role planning, same-type income ranking, stock, and local trends into one local-first panel.
 
-## Included
+## Features
 
-- Daily, weekly, and 30-day tracked/forecast revenue and net estimates
-- Employee effectiveness, addiction and inactivity impact, and local staffing planner
-- Opt-in TornStats role-efficiency projections with per-position caps, priority, and locks
-- Same-type income rank, transparent income-percentile health score, and observed star gaps
-- Stock, gross-margin, company-condition, funds-news, and local trend views
-- Persistent panel position/size, mobile-safe layout, CSV export, and local-only history
+### Overview and income
 
-## Install
+- Torn-reported daily and weekly revenue.
+- Daily and weekly net estimates plus 30-day tracked or forecast revenue/net figures.
+- Company condition, funds, ad budget, trains, applications, and recent funds news when the API key can access them.
+- Same-type income rank, transparent health score, observed next-star gap, and previous-star buffer.
 
-1. Add [Naughty Company Companion.user.js](./Naughty%20Company%20Companion.user.js) to Tampermonkey or TornPDA.
-2. Open the panel with the chess-piece launcher (or <kbd>Alt</kbd>+<kbd>C</kbd>).
-3. In **Settings**, save a Torn API key. A Limited/director key enables stock, wages, funds news, and richer estimates.
-4. Optionally add a TornStats API key. Enable the explicit consent toggle before requesting per-employee projections; this sends employee M/I/E work-stat triplets to TornStats.
+### Team and planner
+
+- Compact employee cards showing current role, current total effectiveness, local assigned role, assigned effectiveness, addiction and inactivity effects, best fit, wage, and recent activity.
+- Current and assigned effectiveness prefer **TornStats role base plus Torn non-working effects**. Torn’s direct total is used only before a matching TornStats projection exists.
+- Per-employee role selector, lock control, and local-only assignment plan.
+- Dynamic roles discovered from the matching TornStats company-type block; no hard-coded position list.
+- Per-role capacity limits, priority order, and auto-assignment that locks current seats first, then fills by priority and projected efficiency within company capacity.
+- Sortable Assignment preview columns: Employee, Current, Assigned, Current Eff., Assigned Eff., Change, and Lock.
+
+### Rankings, stock, and trends
+
+- Same-type company ranking loaded through Torn pagination and sorted locally by weekly income.
+- Health score defined transparently as weekly-income percentile among same company type.
+- Observed weekly-income gaps to the next and previous star bands; these are planning estimates, not an official Torn formula.
+- Stock, sales, gross margin, and a per-item daily **Stock difference** once a prior local reporting-day snapshot exists.
+- Local daily history retained for 92 days, trend chart, and CSV export.
+
+### Interface
+
+- Overview, Team, Planner, Rankings, Stock, Trends, and Settings tabs.
+- Explicit refresh labels explaining which data will be loaded.
+- Persistent panel position, size, selected tab, plans, capacities, priorities, and local history.
+- Desktop drag/resize/minimize controls and a safe mobile TornPDA layout.
+
+## Installation
+
+1. Install [Tampermonkey](https://www.tampermonkey.net/) or use TornPDA’s userscript support.
+2. Open the [raw userscript](https://raw.githubusercontent.com/xf4k31tx/Naughty-Company-Companion/main/Naughty%20Company%20Companion.user.js) and install it.
+3. Reload Torn and open the panel from the chess-piece launcher, or press <kbd>Alt</kbd>+<kbd>C</kbd>.
+4. In **Settings**, save a Torn API key, then select **Save keys & refresh Torn data**.
+5. Optionally save a TornStats API key and enable the explicit projection-consent toggle before selecting **Calculate TornStats role projections**.
+
+## API access and refresh behavior
+
+A Torn API key is required for company data. A Limited or director/manager-capable key exposes more fields, including stock, employee wages, applications, and funds news. Missing fields remain unavailable rather than being treated as zero.
+
+The top **Refresh Torn data** action loads company profile, employees, stock, funds news, and applications. Same-type rankings are loaded separately because they require paging through every company of your type. TornStats efficiency projections are loaded separately and cached for 24 hours per employee work-stat triplet.
+
+## TornStats consent and privacy
+
+Role projections are optional. When enabled, the script sends each employee’s Manual labor, Intelligence, and Endurance values to TornStats with your TornStats API key to calculate role efficiencies. This is disclosed in Settings and is never performed until you opt in.
+
+All keys, cached data, staffing plans, rankings, and history stay in local userscript storage. The companion requests Torn data directly from `api.torn.com` and uses `www.tornstats.com` only for consented role projections. It does not upload history or plans elsewhere.
+
+Treat API keys as secrets. Revoke and replace a key if it may have been exposed.
 
 ## Calculation notes
 
-Revenue is supplied by Torn. Daily net estimate is:
+Daily net estimate:
 
 ```text
 daily revenue − sold stock cost − advertising budget − total wages
 ```
 
-Weekly net follows Torn Company Assistant’s observed formula:
+Weekly net estimate:
 
 ```text
 weekly revenue − 7 × (advertising budget + total wages)
 ```
 
-The health score is a transparent same-type weekly-income percentile, not an unpublished Torn score. Star gaps use observed weekly-income rank cutoffs and are explicitly estimates.
+Weekly net omits sold stock cost because Torn exposes stock sales as a daily value. The health score is a visible weekly-income percentile, not a hidden company-quality value. Star thresholds and gaps are observed rank cutoffs, so use them as guidance rather than a guarantee.
 
-## Data sources
+## Updating and verification
 
-- [Torn API v2 documentation](https://www.torn.com/api.html)
-- [TornStats API documentation](https://www.tornstats.com/api)
-
-## Verify
+Reopen the raw userscript URL in your userscript manager to update.
 
 ```powershell
 node --check "Naughty Company Companion.user.js"
 node --test company-companion-regression.test.js
 ```
+
+## Data sources
+
+- [Torn API documentation](https://www.torn.com/api.html)
+- [TornStats API documentation](https://www.tornstats.com/api)
