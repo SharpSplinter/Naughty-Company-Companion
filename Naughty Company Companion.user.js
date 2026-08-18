@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.0.1
+// @version      1.0.2
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.0.1";
+    const VERSION = "1.0.2";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -92,6 +92,7 @@
         const number = asFinite(value);
         return number === null ? "—" : new Intl.NumberFormat("en-US", { maximumFractionDigits }).format(number);
     };
+    const preferredCurrentEfficiency = (tornCurrent, tornStatsCurrent) => asFinite(tornStatsCurrent) ?? asFinite(tornCurrent);
     const formatMoney = (value, compact = false) => {
         const number = asFinite(value);
         if (number === null) return "—";
@@ -432,15 +433,17 @@
             const employeeId = String(employee.id || "");
             const hasSavedAssignment = Object.prototype.hasOwnProperty.call(settings.assignments || {}, employeeId);
             const assignedPosition = String(hasSavedAssignment ? settings.assignments[employeeId] : (currentPosition || ""));
+            const projectedCurrent = projected?.[currentPosition];
             const assignedBase = projected?.[assignedPosition];
             const assignedEfficiency = assignedBase === undefined ? null : asNumber(assignedBase) + nonWorkingDelta;
             return {
                 id: employeeId,
                 name: String(employee.name || "Unknown"),
                 currentPosition,
-                currentEfficiency: asFinite(effectiveness.total),
+                currentEfficiency: preferredCurrentEfficiency(effectiveness.total, projectedCurrent),
+                currentEfficiencySource: projectedCurrent === undefined ? "Torn fallback" : "TornStats",
                 workingStats: asFinite(effectiveness.working_stats),
-                projectedCurrent: projected?.[currentPosition] === undefined ? null : asNumber(projected[currentPosition]),
+                projectedCurrent: projectedCurrent === undefined ? null : asNumber(projectedCurrent),
                 projected,
                 bestPosition: best[0],
                 bestEfficiency: best[1] === null ? null : best[1] + nonWorkingDelta,
@@ -945,11 +948,11 @@
         const table = rows.length ? `<div class="ncc-team-grid">${rows.map((row) => {
             const misplaced = row.assignedPosition && row.currentPosition && row.assignedPosition !== row.currentPosition;
             const lastAction = row.lastAction ? timeAgo(row.lastAction * 1000) : "—";
-            return `<article class="ncc-team-card ${misplaced ? "ncc-misplaced" : ""}"><div class="ncc-team-top"><input type="checkbox" data-lock-employee="${row.id}" ${row.locked ? "checked" : ""} title="Lock: keep this employee in their current position during auto-assign"><b class="ncc-team-name" title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</b><span class="ncc-team-meta">${escapeHtml(row.status)} · ${formatOptionalNumber(row.days)}d</span></div><div class="ncc-team-line"><span class="ncc-team-current" title="Current position and Torn-reported efficiency"><b>Current:</b> ${escapeHtml(row.currentPosition || "—")} · ${formatOptionalNumber(row.currentEfficiency, 1)}</span><span class="ncc-team-meta">Base ${formatOptionalNumber(row.projectedCurrent, 1)}</span></div><div class="ncc-team-line"><select class="ncc-select ncc-team-select" data-assignment="${row.id}" title="Assigned position for this local projection" ${positions.length ? "" : "disabled"}>${selectOptions(row) || "<option>Load projections</option>"}</select><span class="ncc-team-assigned" title="Assigned efficiency"><b>Assigned:</b> ${formatOptionalNumber(row.assignedEfficiency, 1)} · ${formatSignedNumber(row.nonWorkingDelta)}</span></div><div class="ncc-team-line ncc-team-effects"><span class="${asNumber(row.addiction) < 0 ? "ncc-bad" : ""}">Addiction ${formatSignedNumber(row.addiction)}</span><span class="${asNumber(row.inactivity) < 0 ? "ncc-bad" : ""}">Inactivity ${formatSignedNumber(row.inactivity)}</span><span title="Best-fit projected position">Best ${escapeHtml(row.bestPosition || "—")} ${formatOptionalNumber(row.bestEfficiency, 1)}</span></div><div class="ncc-team-line ncc-team-effects"><span>Wage ${formatMoney(row.wage, true)} · Last action ${escapeHtml(lastAction)}</span></div></article>`;
+            return `<article class="ncc-team-card ${misplaced ? "ncc-misplaced" : ""}"><div class="ncc-team-top"><input type="checkbox" data-lock-employee="${row.id}" ${row.locked ? "checked" : ""} title="Lock: keep this employee in their current position during auto-assign"><b class="ncc-team-name" title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</b><span class="ncc-team-meta">${escapeHtml(row.status)} · ${formatOptionalNumber(row.days)}d</span></div><div class="ncc-team-line"><span class="ncc-team-current" title="Current position and preferred TornStats effectiveness"><b>Current:</b> ${escapeHtml(row.currentPosition || "—")} · ${formatOptionalNumber(row.currentEfficiency, 1)}</span><span class="ncc-team-meta">${escapeHtml(row.currentEfficiencySource)}</span></div><div class="ncc-team-line"><select class="ncc-select ncc-team-select" data-assignment="${row.id}" title="Assigned position for this local projection" ${positions.length ? "" : "disabled"}>${selectOptions(row) || "<option>Load projections</option>"}</select><span class="ncc-team-assigned" title="Assigned efficiency"><b>Assigned:</b> ${formatOptionalNumber(row.assignedEfficiency, 1)} · ${formatSignedNumber(row.nonWorkingDelta)}</span></div><div class="ncc-team-line ncc-team-effects"><span class="${asNumber(row.addiction) < 0 ? "ncc-bad" : ""}">Addiction ${formatSignedNumber(row.addiction)}</span><span class="${asNumber(row.inactivity) < 0 ? "ncc-bad" : ""}">Inactivity ${formatSignedNumber(row.inactivity)}</span><span title="Best-fit projected position">Best ${escapeHtml(row.bestPosition || "—")} ${formatOptionalNumber(row.bestEfficiency, 1)}</span></div><div class="ncc-team-line ncc-team-effects"><span>Wage ${formatMoney(row.wage, true)} · Last action ${escapeHtml(lastAction)}</span></div></article>`;
         }).join("")}</div>` : `<div class="ncc-notice">No employee rows match the filter, or employee details are not available for this API key.</div>`;
         const values = rows.map((row) => row.currentEfficiency).filter((value) => value !== null);
         const affected = rows.filter((row) => asNumber(row.addiction) < 0 || asNumber(row.inactivity) < 0).length;
-        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-team-filter" type="search" value="${escapeHtml(state.teamFilter)}" placeholder="Filter employee or role"><button class="ncc-button ncc-primary" data-action="load-projections" title="Sends work-stat triplets to TornStats (only after consent) and refreshes each employee’s role efficiency options" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button><button class="ncc-button" data-tab="planner">Open capacity planner</button><span class="ncc-help">${formatNumber(rows.length)} staff · ${formatNumber(state.data?.profile?.employees?.capacity)} capacity · Avg. ${values.length ? formatNumber(values.reduce((sum, value) => sum + asNumber(value), 0) / values.length, 1) : "—"} effectiveness · ${formatNumber(affected)} with penalties</span></div>${section("Employee efficiency", table)}<p class="ncc-note">Each card shows current role/effectiveness, the local assigned role and efficiency, addiction/inactivity effects, best fit, wage, and last activity. Assigned efficiency = TornStats’ education-assumed projection + the current non-working-stat effect delta.</p>`;
+        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-team-filter" type="search" value="${escapeHtml(state.teamFilter)}" placeholder="Filter employee or role"><button class="ncc-button ncc-primary" data-action="load-projections" title="Sends work-stat triplets to TornStats (only after consent) and refreshes each employee’s role efficiency options" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button><button class="ncc-button" data-tab="planner">Open capacity planner</button><span class="ncc-help">${formatNumber(rows.length)} staff · ${formatNumber(state.data?.profile?.employees?.capacity)} capacity · Avg. ${values.length ? formatNumber(values.reduce((sum, value) => sum + asNumber(value), 0) / values.length, 1) : "—"} effectiveness · ${formatNumber(affected)} with penalties</span></div>${section("Employee efficiency", table)}<p class="ncc-note">Current Eff. and assigned efficiency use TornStats role projections when available; Torn’s direct current effectiveness is only the fallback before projections are loaded. Assigned efficiency adds Torn’s current non-working-stat effect delta.</p>`;
     }
 
     function formatSignedNumber(value, digits = 1) {
@@ -1391,7 +1394,7 @@
         window.addEventListener("beforeunload", () => { void persistLayout(); });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, preferredCurrentEfficiency };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof document !== "undefined" && typeof window !== "undefined") {
         if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { void boot(); }, { once: true });
