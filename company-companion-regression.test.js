@@ -95,3 +95,14 @@ test("reporting day rolls over at 18:10 UTC", () => {
     assert.equal(companion.reportingPeriod(before), Date.UTC(2026, 7, 17, 18, 10, 0));
     assert.equal(companion.reportingPeriod(after), after);
 });
+
+test("stock difference compares current stock to the prior reporting-day snapshot", () => {
+    const item = { id: 42, in_stock: 125 };
+    const history = [
+        { period: 100, stock: { 42: { inStock: 95, onOrder: 0 } } },
+        { period: 200, stock: { 42: { inStock: 110, onOrder: 0 } } }
+    ];
+
+    assert.equal(companion.stockDifference(item, companion.previousStockSnapshot(history, 300)), 15);
+    assert.equal(companion.stockDifference(item, companion.previousStockSnapshot([], 300)), null);
+});
