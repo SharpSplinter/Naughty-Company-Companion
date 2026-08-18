@@ -107,7 +107,7 @@ test("stock difference compares current stock to the prior reporting-day snapsho
     assert.equal(companion.stockDifference(item, companion.previousStockSnapshot([], 300)), null);
 });
 
-test("current effectiveness prefers TornStats when a matching role projection exists", () => {
-    assert.equal(companion.preferredCurrentEfficiency(130, 128), 128);
-    assert.equal(companion.preferredCurrentEfficiency(130, undefined), 130);
+test("current effectiveness combines TornStats role base with Torn non-working effects", () => {
+    assert.equal(companion.preferredCurrentEfficiency(130, 102, 26), 128);
+    assert.equal(companion.preferredCurrentEfficiency(130, undefined, 26), 130);
 });
