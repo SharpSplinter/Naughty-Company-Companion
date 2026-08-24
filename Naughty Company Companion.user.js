@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.2.1
+// @version      1.2.2
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/companies.php*
@@ -23,7 +23,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.1";
+    const VERSION = "1.2.2";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -158,6 +158,10 @@
     const formatOptionalNumber = (value, maximumFractionDigits = 0) => {
         const number = asFinite(value);
         return number === null ? "—" : new Intl.NumberFormat("en-US", { maximumFractionDigits }).format(number);
+    };
+    const formatAverageEffectiveness = (value) => {
+        const number = asFinite(value);
+        return number === null ? "—" : new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(number);
     };
     const preferredCurrentEfficiency = (tornTotal, tornStatsBase, nonWorkingDelta) => {
         const base = asFinite(tornStatsBase);
@@ -2319,7 +2323,7 @@
                 ${metricCard("Health score", healthValue, healthSub, rankings ? "ncc-good" : "ncc-muted", rankings ? "show-health" : "load-rankings")}
                 ${metricCard("30-day income", formatMoney(monthlyIncome), monthly.useTrackedIncome ? `${monthly.coverage}/30 tracked days` : `${monthly.coverage}/30 tracked · forecast`, "ncc-good")}
                 ${metricCard("30-day Profit", formatMoney(monthlyProfit), monthlyProfit === null ? "Needs profit access" : monthly.useTrackedProfit ? `${monthly.profitCoverage}/30 tracked days` : `${monthly.profitCoverage}/30 tracked · forecast`, monthlyProfit !== null && monthlyProfit >= 0 ? "ncc-good" : monthlyProfit === null ? "ncc-muted" : "ncc-bad")}
-                ${metricCard("Workforce", `${formatNumber(profile.employees?.hired)} / ${formatNumber(profile.employees?.capacity)}`, averageEfficiency === null ? "Employee details unavailable" : `Avg effectiveness ${formatNumber(averageEfficiency)}`)}
+                ${metricCard("Workforce", `${formatNumber(profile.employees?.hired)} / ${formatNumber(profile.employees?.capacity)}`, averageEfficiency === null ? "Employee details unavailable" : `Avg effectiveness ${formatAverageEffectiveness(averageEfficiency)}`)}
                 ${metricCard("Company cash", formatMoney(profile.funds), `Value ${formatMoney(profile.value)}`)}
             </div>`;
         const rankBody = rankings ? `
@@ -2373,7 +2377,7 @@
             : tornPdaUserAgent(currentUserAgent())
                 ? "TornPDA (awaiting native confirmation) / compact cards"
                 : mode === "mobile" ? "Compact viewport cards" : "Desktop detailed list";
-        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-team-filter" type="search" value="${escapeHtml(state.teamFilter)}" placeholder="Filter employee or role"><button class="ncc-button ncc-primary" data-action="load-projections" title="Sends work-stat triplets to TornStats (only after consent) and refreshes each employee’s role efficiency options" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button><button class="ncc-button" data-tab="planner">Open capacity planner</button><span class="ncc-help">${runtimeLabel} · ${formatNumber(rows.length)} staff · ${formatNumber(state.data?.profile?.employees?.capacity)} capacity · Avg. ${values.length ? formatNumber(values.reduce((sum, value) => sum + asNumber(value), 0) / values.length) : "—"} effectiveness · ${formatNumber(affected)} with penalties</span></div>${section("Employee efficiency", table)}<p class="ncc-note">Current Eff. and assigned efficiency use TornStats role base + Torn’s non-working-stat effect delta when available; Torn’s direct total is only the fallback before projections load.</p>`;
+        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-team-filter" type="search" value="${escapeHtml(state.teamFilter)}" placeholder="Filter employee or role"><button class="ncc-button ncc-primary" data-action="load-projections" title="Sends work-stat triplets to TornStats (only after consent) and refreshes each employee’s role efficiency options" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button><button class="ncc-button" data-tab="planner">Open capacity planner</button><span class="ncc-help">${runtimeLabel} · ${formatNumber(rows.length)} staff · ${formatNumber(state.data?.profile?.employees?.capacity)} capacity · Avg. ${values.length ? formatAverageEffectiveness(values.reduce((sum, value) => sum + asNumber(value), 0) / values.length) : "—"} effectiveness · ${formatNumber(affected)} with penalties</span></div>${section("Employee efficiency", table)}<p class="ncc-note">Current Eff. and assigned efficiency use TornStats role base + Torn’s non-working-stat effect delta when available; Torn’s direct total is only the fallback before projections load.</p>`;
     }
 
     function formatSignedNumber(value, digits = 0) {
@@ -2575,7 +2579,7 @@
         const numeric = trendNumber(value);
         if (numeric === null) return "Unavailable";
         if (series.format === "money") return formatMoney(numeric, true);
-        if (series.format === "effectiveness") return formatNumber(numeric);
+        if (series.format === "effectiveness") return formatAverageEffectiveness(numeric);
         if (series.format === "rank") return `#${formatNumber(numeric)}`;
         return formatNumber(numeric);
     }
@@ -2613,7 +2617,7 @@
         const rank = trendNumber(row.companyRank);
         const rankTotal = trendNumber(row.companyRankTotal);
         const dailyProfit = trendNumber(row.dailyProfit);
-        return `<div class="ncc-grid ncc-grid-3 ncc-trend-detail"><div class="ncc-kv"><span>Daily income</span><span>${trendNumber(row.dailyIncome) === null ? "—" : formatMoney(row.dailyIncome)}</span></div><div class="ncc-kv"><span>Stock</span><span>${stockValue === null ? "Unavailable" : `${formatMoney(stockValue, true)} · ${stockQuantity === null ? "—" : formatNumber(stockQuantity)} qty`}</span></div><div class="ncc-kv"><span>Avg employee eff.</span><span>${averageEfficiency === null ? "—" : formatNumber(averageEfficiency)}</span></div><div class="ncc-kv"><span>Star level</span><span>${trendNumber(row.rating) === null ? "—" : `${formatNumber(row.rating)}★`}</span></div><div class="ncc-kv"><span>Daily profit</span><span class="${dailyProfit === null ? "ncc-muted" : dailyProfit >= 0 ? "ncc-good" : "ncc-bad"}">${dailyProfit === null ? "—" : formatMoney(dailyProfit)}</span></div><div class="ncc-kv"><span>Company rank</span><span>${rank === null ? "Unavailable" : `${formatNumber(rank)}${rankTotal === null ? "" : ` / ${formatNumber(rankTotal)}`}`}</span></div><div class="ncc-kv"><span>Performance vs previous day</span><span class="${performance.tone}">${performance.label}</span></div></div><p class="ncc-note">${escapeHtml(formatDateTime(row.period))} · ${escapeHtml(performance.detail)}. Hover any chart point for daily values, or select one to compare that day with its prior local snapshot.</p>`;
+        return `<div class="ncc-grid ncc-grid-3 ncc-trend-detail"><div class="ncc-kv"><span>Daily income</span><span>${trendNumber(row.dailyIncome) === null ? "—" : formatMoney(row.dailyIncome)}</span></div><div class="ncc-kv"><span>Stock</span><span>${stockValue === null ? "Unavailable" : `${formatMoney(stockValue, true)} · ${stockQuantity === null ? "—" : formatNumber(stockQuantity)} qty`}</span></div><div class="ncc-kv"><span>Avg employee eff.</span><span>${averageEfficiency === null ? "—" : formatAverageEffectiveness(averageEfficiency)}</span></div><div class="ncc-kv"><span>Star level</span><span>${trendNumber(row.rating) === null ? "—" : `${formatNumber(row.rating)}★`}</span></div><div class="ncc-kv"><span>Daily profit</span><span class="${dailyProfit === null ? "ncc-muted" : dailyProfit >= 0 ? "ncc-good" : "ncc-bad"}">${dailyProfit === null ? "—" : formatMoney(dailyProfit)}</span></div><div class="ncc-kv"><span>Company rank</span><span>${rank === null ? "Unavailable" : `${formatNumber(rank)}${rankTotal === null ? "" : ` / ${formatNumber(rankTotal)}`}`}</span></div><div class="ncc-kv"><span>Performance vs previous day</span><span class="${performance.tone}">${performance.label}</span></div></div><p class="ncc-note">${escapeHtml(formatDateTime(row.period))} · ${escapeHtml(performance.detail)}. Hover any chart point for daily values, or select one to compare that day with its prior local snapshot.</p>`;
     }
 
     function trendLineSegments(rows, key, x, y) {
@@ -3246,7 +3250,7 @@
         });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores, utf8Base64 };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, formatAverageEffectiveness, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores, utf8Base64 };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
     if (typeof document !== "undefined" && typeof window !== "undefined") {

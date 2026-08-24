@@ -140,6 +140,11 @@ test("current effectiveness combines TornStats role base with Torn non-working e
     assert.equal(companion.preferredCurrentEfficiency(130, undefined, 26), 130);
 });
 
+test("average employee effectiveness keeps one decimal place", () => {
+    assert.equal(companion.formatAverageEffectiveness(128.46), "128.5");
+    assert.equal(companion.formatAverageEffectiveness(128), "128.0");
+});
+
 test("assignment preview values sort through the shared table sorter", () => {
     const rows = [
         { name: "B", current: 130, assigned: 128, change: -2, lock: 0 },
@@ -173,7 +178,7 @@ test("trend selector uses only local metrics and includes Profit in point toolti
     });
     assert.match(companion.trendPointTooltip(history[0], "income-profit"), /Daily income: \$100\nDaily profit: \$25/);
     assert.match(companion.trendPointTooltip(history[0], "stock"), /In-stock quantity: 9/);
-    assert.match(companion.trendPointTooltip(history[0], "effectiveness"), /Avg employee effectiveness: 100/);
+    assert.match(companion.trendPointTooltip({ ...history[0], averageEmployeeEfficiency: 100.46 }, "effectiveness"), /Avg employee effectiveness: 100.5/);
     assert.match(companion.trendPointTooltip(history[0], "ranking"), /Company rank: #3/);
     assert.equal(companion.trendNumber(null), null);
 });

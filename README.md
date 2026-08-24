@@ -15,6 +15,7 @@ Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn compa
 
 - Compact employee cards showing current role, current total effectiveness, local assigned role, assigned effectiveness, addiction and inactivity effects, best fit, wage, and recent activity.
 - Current and assigned effectiveness prefer **TornStats role base plus Torn non-working effects**. Torn’s direct total is used only before a matching TornStats projection exists.
+- Average employee effectiveness is shown to one decimal place across the workforce summary and effectiveness trend details.
 - Per-employee role selector, lock control, and local-only assignment plan.
 - Dynamic roles discovered from the matching TornStats company-type block; no hard-coded position list.
 - A dedicated **Position config** modal holds per-role max-quantity dropdowns and persistent click-up/click-down priority controls. Auto-assignment locks current seats first, then fills top-to-bottom by priority and projected efficiency within company capacity.
