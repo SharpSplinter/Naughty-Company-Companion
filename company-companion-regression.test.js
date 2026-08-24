@@ -256,3 +256,20 @@ test("native background reminders use the next tick phase and generic text only"
     assert.equal(companion.dailyAlertKindAt(beforeTick), null);
     assert.equal(companion.nextDailyReminderTimestamp({ minute: 0 }, incomeTick), tomorrowIncomeTick);
 });
+
+test("console diagnostic descriptors never expose API query, header, or TornStats path secrets", () => {
+    assert.deepEqual(
+        companion.safeRequestDescriptor("https://api.torn.com/v2/company/profile?api_key=query-secret", "get"),
+        { method: "GET", host: "api.torn.com", path: "/v2/company/profile" }
+    );
+    assert.deepEqual(
+        companion.safeRequestDescriptor("https://www.tornstats.com/api/v2/tornstats-secret/efficiency?man=10", "GET"),
+        { method: "GET", host: "www.tornstats.com", path: "/api/v2/[redacted]/efficiency" }
+    );
+    const message = companion.safeDiagnosticError(new Error("Failed https://www.tornstats.com/api/v2/tornstats-secret/efficiency?token=query-secret Authorization: ApiKey header-secret token=other-secret"));
+    const barePathMessage = companion.safeDiagnosticError(new Error("Native request failed at /api/v2/tornstats-secret/efficiency"));
+
+    assert.match(message, /www\.tornstats\.com\/api\/v2\/\[redacted\]\/efficiency/);
+    assert.doesNotMatch(message, /tornstats-secret|query-secret|header-secret|other-secret/);
+    assert.doesNotMatch(barePathMessage, /tornstats-secret/);
+});

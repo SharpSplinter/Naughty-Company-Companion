@@ -85,6 +85,10 @@ The daily-tick assistant runs while the Company page/userscript remains active. 
 
 Confirmed TornPDA installs also keep one generic native background reminder for each next phase (18:00 and 18:10 UTC), with a callback to the Company page. These reminders never claim live figures: they tell you to open the companion and refresh. When the Company page is active, the script cancels that phase's generic reminder immediately before the tick, sends the detailed live alert, and establishes the following day's generic reminder. The schedules are refreshed on native startup/confirmation and removed when local companion data is cleared. Desktop deliberately has no simulated background-reminder capability.
 
+## Console diagnostics
+
+The browser/TornPDA console shows `[Naughty Company Companion]` startup/runtime, storage, and API transport diagnostics by default. Request logs contain only method, host, path, status, transport, and duration. Query strings, headers, Torn API keys, and the TornStats key path segment are redacted; response bodies are never logged.
+
 ## Updating and verification
 
 Reopen the raw userscript URL in your userscript manager to update.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.1.5
+// @version      1.1.6
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/companies.php*
@@ -23,7 +23,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.1.5";
+    const VERSION = "1.1.6";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -48,6 +48,7 @@
         }
     });
     const EFFECTIVENESS_ALERT_THRESHOLD = -12;
+    const DIAGNOSTIC_PREFIX = "[Naughty Company Companion]";
     const STORE = {
         settings: "ncc:settings:v1",
         cache: "ncc:cache:v1",
@@ -114,7 +115,8 @@
         pda: null,
         mode: "legacy",
         initialized: false,
-        fallbackKeys: new Set()
+        fallbackKeys: new Set(),
+        lastDiagnostic: ""
     };
     let resolveFlutterReady;
     const flutterReadyPromise = new Promise((resolve) => { resolveFlutterReady = resolve; });
@@ -193,6 +195,52 @@
         positionPriority: isObject(raw?.positionPriority) ? raw.positionPriority : {}
     });
 
+    function safeRequestDescriptor(url, method = "GET") {
+        const normalizedMethod = String(method || "GET").toUpperCase();
+        try {
+            const parsed = new URL(String(url));
+            let path = parsed.pathname || "/";
+            if (/tornstats\.com$/i.test(parsed.hostname)) path = path.replace(/^\/api\/v2\/[^/]+/, "/api/v2/[redacted]");
+            return { method: normalizedMethod, host: parsed.host, path };
+        } catch {
+            const path = String(url ?? "").split(/[?#]/)[0] || "/";
+            return { method: normalizedMethod, host: "unknown", path: path.startsWith("/") ? path : "/" };
+        }
+    }
+
+    function safeDiagnosticError(error) {
+        const message = String(error?.message || error || "Unknown error");
+        return message
+            .replace(/https?:\/\/[^\s'"<>]+/gi, (url) => {
+                const request = safeRequestDescriptor(url);
+                return `${request.host}${request.path}`;
+            })
+            .replace(/(\/api\/v2\/)[^/\s,;]+/gi, "$1[redacted]")
+            .replace(/\b(ApiKey|Bearer)\s+[^\s,;]+/gi, "$1 [redacted]")
+            .replace(/\b(api[_-]?key|key|token|authorization)\s*([:=])\s*[^\s,;]+/gi, "$1$2[redacted]")
+            .slice(0, 280);
+    }
+
+    function diagnostic(level, event, details = {}) {
+        try {
+            const logger = typeof console === "undefined" ? null : (console[level] || console.log);
+            logger?.call(console, `${DIAGNOSTIC_PREFIX} ${event}`, details);
+        } catch {
+            // Diagnostics must never interfere with the companion.
+        }
+    }
+
+    const debugLog = (event, details) => diagnostic("log", event, details);
+    const warningLog = (event, details) => diagnostic("warn", event, details);
+    const errorLog = (event, details) => diagnostic("error", event, details);
+
+    function storageDiagnostic(event, details = {}) {
+        const signature = `${event}:${JSON.stringify(details)}`;
+        if (storage.lastDiagnostic === signature) return;
+        storage.lastDiagnostic = signature;
+        warningLog(event, details);
+    }
+
     function getPageStorage() {
         try {
             return typeof localStorage === "undefined" ? null : localStorage;
@@ -260,9 +308,11 @@
     }
 
     function showStorageWarning(error) {
-        state.storageWarning = error?.code === "QuotaExceeded"
+        const quotaExceeded = error?.code === "QuotaExceeded";
+        state.storageWarning = quotaExceeded
             ? "TornPDA storage is full; newer companion data is safely using compatible userscript storage."
             : "TornPDA storage is unavailable; compatible userscript storage is active.";
+        storageDiagnostic("storage:fallback", { mode: "GM/local", reason: quotaExceeded ? "quota exceeded" : "native storage unavailable" });
     }
 
     async function writeLegacyFallback(values, error) {
@@ -273,6 +323,7 @@
             showStorageWarning(error);
         } catch {
             state.storageWarning = "Companion storage is full or unavailable; the latest local change could not be saved.";
+            storageDiagnostic("storage:write failure", { mode: "GM/local", reason: "write unavailable" });
         }
     }
 
@@ -297,6 +348,7 @@
             await legacySetMany(next);
         } catch {
             state.storageWarning = "Companion storage is unavailable; the latest local change could not be saved.";
+            storageDiagnostic("storage:write failure", { mode: "GM/local", reason: "write unavailable" });
         }
     }
 
@@ -325,6 +377,7 @@
             storage.cache = legacyValues;
             storage.mode = "legacy";
             storage.initialized = true;
+            storageDiagnostic("storage:startup fallback", { mode: "GM/local", reason: "PDA_storage not exposed" });
             return storage.cache;
         }
         try {
@@ -357,6 +410,7 @@
                     showStorageWarning(error);
                 }
             }
+            debugLog("storage:PDA_storage ready", { cachedKeys: Object.keys(pdaValues).length, migratedKeys: Object.keys(migrations).length });
             return storage.cache;
         } catch (error) {
             const legacyValues = await loadLegacyValues();
@@ -406,12 +460,14 @@
                 const previous = nativeRuntime.isTornPDA;
                 nativeRuntime.isTornPDA = response?.isTornPDA === true;
                 nativeRuntime.confirmationComplete = true;
+                debugLog("runtime:bridge confirmed", { isTornPDA: nativeRuntime.isTornPDA, userAgentHint: tornPdaUserAgent(currentUserAgent()) });
                 if (previous !== nativeRuntime.isTornPDA || tornPdaUserAgent(currentUserAgent())) refreshRuntimePresentation();
                 if (nativeRuntime.isTornPDA) void refreshDailyTickReminders({ force: true });
                 return nativeRuntime.isTornPDA;
             })
-            .catch(() => {
+            .catch((error) => {
                 nativeRuntime.confirmationComplete = false;
+                warningLog("runtime:bridge confirmation failed", { reason: safeDiagnosticError(error) });
                 return false;
             })
             .finally(() => {
@@ -424,12 +480,14 @@
         if (!nativeRuntime.flutterReady) {
             nativeRuntime.flutterReady = true;
             resolveFlutterReady?.(true);
+            debugLog("runtime:flutter bridge ready", { bridgePresent: Boolean(getFlutterBridge()) });
         }
         void confirmTornPDA({ retry: true });
     }
 
     function initializeNativeRuntime() {
         if (typeof window === "undefined") return;
+        debugLog("runtime:startup", { bridgePresent: Boolean(getFlutterBridge()), userAgentHint: tornPdaUserAgent(currentUserAgent()) });
         window.addEventListener("flutterInAppWebViewPlatformReady", markFlutterReady);
         // document-idle scripts may start after the readiness event; a live bridge is then ready to confirm.
         if (getFlutterBridge()) markFlutterReady();
@@ -468,7 +526,8 @@
         if (!bridge) return null;
         try {
             return await bridge.callHandler(handler, ...args);
-        } catch {
+        } catch (error) {
+            warningLog("runtime:native handler failed", { handler, reason: safeDiagnosticError(error) });
             return null;
         }
     }
@@ -645,33 +704,78 @@
 
     function gmTextRequest({ url, headers = {}, method = "GET", timeout = 30000 }) {
         return new Promise((resolve, reject) => {
-            const onload = (response) => {
+            const request = safeRequestDescriptor(url, method);
+            const startedAt = Date.now();
+            let settled = false;
+            const durationMs = () => Math.max(0, Date.now() - startedAt);
+            const fail = (error, transport, status = null) => {
+                if (settled) return;
+                settled = true;
+                const failure = error instanceof Error ? error : new Error(safeDiagnosticError(error));
+                errorLog("api:failure", { ...request, transport, status, durationMs: durationMs(), reason: safeDiagnosticError(failure) });
+                reject(failure);
+            };
+            const onload = (response, transport) => {
+                if (settled) return;
                 const status = Number(response?.status ?? 200);
                 if (status >= 200 && status < 300) {
                     const body = typeof response === "string" ? response : (response?.responseText ?? JSON.stringify(response?.body ?? response));
+                    settled = true;
+                    debugLog("api:success", { ...request, transport, status, durationMs: durationMs() });
                     resolve(body);
                     return;
                 }
-                reject(new Error(`Request failed (${status || "unknown status"}).`));
+                fail(new Error(`Request failed (${status || "unknown status"}).`), transport, status || null);
             };
-            const onerror = () => reject(new Error("Network request failed."));
-            const request = { method, url, headers: { Accept: "application/json", ...headers }, timeout, onload, onerror, ontimeout: () => reject(new Error("Request timed out.")) };
+            const fetchFallback = (from = "") => {
+                if (from) warningLog("api:transport fallback", { ...request, from, to: "fetch" });
+                debugLog("api:request", { ...request, transport: "fetch" });
+                fetch(url, { method, headers }).then(async (response) => {
+                    if (!response.ok) {
+                        const error = new Error(`Request failed (${response.status}).`);
+                        error.status = response.status;
+                        throw error;
+                    }
+                    return { status: response.status, responseText: await response.text() };
+                }).then((response) => onload(response, "fetch")).catch((error) => fail(error, "fetch", error?.status || null));
+            };
             if (typeof GM_xmlhttpRequest === "function") {
-                GM_xmlhttpRequest(request);
+                debugLog("api:request", { ...request, transport: "GM_xmlhttpRequest" });
+                try {
+                    GM_xmlhttpRequest({
+                        method,
+                        url,
+                        headers: { Accept: "application/json", ...headers },
+                        timeout,
+                        onload: (response) => onload(response, "GM_xmlhttpRequest"),
+                        onerror: (error) => fail(error || new Error("Network request failed."), "GM_xmlhttpRequest"),
+                        ontimeout: () => fail(new Error("Request timed out."), "GM_xmlhttpRequest")
+                    });
+                } catch (error) {
+                    fail(error, "GM_xmlhttpRequest");
+                }
                 return;
             }
             if (typeof GM !== "undefined" && typeof GM.xmlHttpRequest === "function") {
-                GM.xmlHttpRequest(request);
+                debugLog("api:request", { ...request, transport: "GM.xmlHttpRequest" });
+                try {
+                    GM.xmlHttpRequest({
+                        method,
+                        url,
+                        headers: { Accept: "application/json", ...headers },
+                        timeout,
+                        onload: (response) => onload(response, "GM.xmlHttpRequest"),
+                        onerror: (error) => fail(error || new Error("Network request failed."), "GM.xmlHttpRequest"),
+                        ontimeout: () => fail(new Error("Request timed out."), "GM.xmlHttpRequest")
+                    });
+                } catch (error) {
+                    fail(error, "GM.xmlHttpRequest");
+                }
                 return;
             }
-            const fetchFallback = () => {
-                fetch(url, { method, headers }).then(async (response) => {
-                    if (!response.ok) throw new Error(`Request failed (${response.status}).`);
-                    resolve(await response.text());
-                }).catch(onerror);
-            };
             if (String(method).toUpperCase() === "GET" && (getFlutterBridge() || nativeRuntime.isTornPDA || tornPdaUserAgent(currentUserAgent()))) {
-                nativeHttpGet(url, request.headers, timeout).then(onload, fetchFallback);
+                debugLog("api:request", { ...request, transport: "PDA_httpGet" });
+                nativeHttpGet(url, { Accept: "application/json", ...headers }, timeout).then((response) => onload(response, "PDA_httpGet"), (error) => fetchFallback(`PDA_httpGet (${safeDiagnosticError(error)})`));
                 return;
             }
             fetchFallback();
@@ -684,10 +788,16 @@
         try {
             payload = JSON.parse(raw);
         } catch {
-            throw new Error(`${source}: Invalid JSON response.`);
+            const error = new Error(`${source}: Invalid JSON response.`);
+            errorLog("api:payload failure", { ...safeRequestDescriptor(options?.url, options?.method), source, reason: safeDiagnosticError(error) });
+            throw error;
         }
         const error = apiError(payload, source);
-        if (error) throw new Error(error);
+        if (error) {
+            const failure = new Error(error);
+            errorLog("api:payload failure", { ...safeRequestDescriptor(options?.url, options?.method), source, reason: safeDiagnosticError(failure) });
+            throw failure;
+        }
         return payload;
     }
 
@@ -2374,6 +2484,13 @@
     async function boot() {
         await loadPersistedState();
         mountShell();
+        debugLog("startup:ready", {
+            version: VERSION,
+            runtimeMode: currentRuntimeMode(),
+            confirmedTornPDA: nativeRuntime.isTornPDA,
+            storageMode: storage.mode,
+            tornKeyConfigured: Boolean(String(state.settings.tornKey || "").trim())
+        });
         if (state.data?.fetchedAt) state.status = `Showing cached data from ${timeAgo(state.data.fetchedAt)}.`;
         else state.status = "Configure a Torn API key to begin.";
         resetAutoRefresh();
@@ -2396,7 +2513,7 @@
         });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, safeRequestDescriptor, safeDiagnosticError };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
     if (typeof document !== "undefined" && typeof window !== "undefined") {
