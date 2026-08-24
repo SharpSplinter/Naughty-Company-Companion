@@ -30,6 +30,23 @@ test("ranking uses star-slot cutoffs instead of adjacent live ratings", () => {
     assert.equal(metrics.percentile, 71.4);
 });
 
+test("company rank summary has only same-star and same-type rank fields", () => {
+    const profile = company("own", 850, 9);
+    const metrics = companion.calculateRankingMetrics([
+        company(1, 1000, 10),
+        company(2, 950, 9),
+        profile,
+        company(4, 800, 10),
+        company(5, 700, 9),
+        company(6, 600, 8)
+    ], profile, { 10: 2, 9: 3, 8: 1 });
+
+    assert.deepEqual(companion.companyRankSummary(metrics, profile), [
+        { rank: 2, total: 3, label: "Current rank in 9★ star level" },
+        { rank: 3, total: 6, label: "Current rank among same-type companies" }
+    ]);
+});
+
 test("daily and weekly net profits mirror company profit rules", () => {
     const result = companion.financials({
         profile: {
@@ -138,8 +155,84 @@ test("trend performance compares available daily signals with the prior day", ()
     assert.equal(result.label, "Improving");
 });
 
-test("runtime mode detects TornPDA and constrained scaled viewports", () => {
+test("trend selector uses only local metrics and includes Profit in point tooltips", () => {
+    const history = [
+        { period: 100, dailyIncome: 100, dailyProfit: 25, stockValue: 900, stockQuantity: 9, averageEmployeeEfficiency: 100, companyRank: 3, companyRankTotal: 20 },
+        { period: 200, dailyIncome: 120, dailyProfit: null, stockValue: null, stockQuantity: null, averageEmployeeEfficiency: null, companyRank: null }
+    ];
+
+    assert.deepEqual(companion.trendChartAvailability(history, "stock"), {
+        id: "stock",
+        label: "Stock",
+        rowCount: 2,
+        dataRows: 1,
+        series: [{ key: "stockValue", label: "Current stock worth", dataPoints: 1 }]
+    });
+    assert.match(companion.trendPointTooltip(history[0], "income-profit"), /Daily income: \$100\nDaily profit: \$25/);
+    assert.match(companion.trendPointTooltip(history[0], "stock"), /In-stock quantity: 9/);
+    assert.match(companion.trendPointTooltip(history[0], "effectiveness"), /Avg employee effectiveness: 100/);
+    assert.match(companion.trendPointTooltip(history[0], "ranking"), /Company rank: #3/);
+    assert.equal(companion.trendNumber(null), null);
+});
+
+test("runtime mode separates native TornPDA confirmation from compact viewport detection", () => {
     assert.equal(companion.runtimeMode({ userAgent: "TornPDA", width: 1200, height: 800 }), "mobile");
+    assert.equal(companion.runtimeMode({ isTornPDA: true, width: 1600, height: 1000 }), "mobile");
+    assert.equal(companion.isCompactViewport({ width: 760, height: 700, scale: 1.25 }), true);
     assert.equal(companion.runtimeMode({ width: 760, height: 700, scale: 1.25 }), "mobile");
+    assert.equal(companion.isCompactViewport({ width: 1200, height: 800, scale: 1 }), false);
     assert.equal(companion.runtimeMode({ width: 1200, height: 800, scale: 1 }), "desktop");
+});
+
+test("daily tick alerts use independent 18:00 and 18:10 UTC phases", () => {
+    const beforeTick = Date.UTC(2026, 7, 24, 17, 59, 59);
+    const incomeTick = Date.UTC(2026, 7, 24, 18, 0, 0);
+    const employeeTick = Date.UTC(2026, 7, 24, 18, 10, 0);
+
+    assert.equal(companion.isDailyAlertDue(beforeTick, 0), false);
+    assert.equal(companion.isDailyAlertDue(incomeTick, 0), true);
+    assert.equal(companion.isDailyAlertDue(incomeTick, 10), false);
+    assert.equal(companion.isDailyAlertDue(employeeTick, 10), true);
+    assert.equal(companion.dailyAlertPhaseTime(employeeTick, 10), employeeTick);
+    assert.equal(companion.nextDailyAlertTimestamp(incomeTick), employeeTick);
+});
+
+test("daily tick alert reports daily income, profit, customers, and freshness", () => {
+    const tick = Date.UTC(2026, 7, 24, 18, 0, 0);
+    const alert = companion.buildDailyTickAlert({
+        fetchedAt: tick + 1000,
+        profile: {
+            income: { daily: 1000, weekly: 7000 },
+            customers: { daily: 88 },
+            advertisement_budget: 100,
+            employees: { hired: 1 }
+        },
+        employees: [{ wage: 100 }],
+        stock: [],
+        stockAvailable: true
+    }, tick + 1000);
+
+    assert.match(alert.text, /Daily Income: \$1,000/);
+    assert.match(alert.text, /Daily Profit: \$800/);
+    assert.match(alert.text, /Daily Customer Count: 88/);
+    assert.equal(alert.source.fresh, true);
+});
+
+test("employee effectiveness alert lists every addiction or inactivity penalty below -12", () => {
+    const tick = Date.UTC(2026, 7, 24, 18, 10, 0);
+    const data = {
+        fetchedAt: tick + 1000,
+        employees: [
+            { id: 1, name: "Addicted", effectiveness: { addiction: -13, inactivity: -12 } },
+            { id: 2, name: "Inactive", effectiveness: { addiction: -8, inactivity: -14 } },
+            { id: 3, name: "Okay", effectiveness: { addiction: -12, inactivity: -12 } }
+        ]
+    };
+    const risks = companion.employeeEffectivenessRisks(data.employees);
+    const alert = companion.buildEmployeeRiskAlert(data, tick + 1000);
+
+    assert.deepEqual(risks.map((risk) => [risk.name, risk.issues.map((issue) => issue.label)]), [["Addicted", ["Addiction"]], ["Inactive", ["Inactivity"]]]);
+    assert.match(alert.text, /Addicted \(Addiction -13\)/);
+    assert.match(alert.text, /Inactive \(Inactivity -14\)/);
+    assert.equal(alert.source.fresh, true);
 });

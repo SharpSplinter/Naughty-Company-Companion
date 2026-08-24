@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.1.1
+// @version      1.1.4
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/companies.php*
@@ -14,6 +14,8 @@
 // @grant        GM.setValue
 // @grant        GM.deleteValue
 // @grant        GM.xmlHttpRequest
+// @grant        GM_notification
+// @grant        GM.notification
 // @connect      api.torn.com
 // @connect      www.tornstats.com
 // ==/UserScript==
@@ -21,13 +23,19 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.1.1";
+    const VERSION = "1.1.4";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
     const DAY = 86400000;
     const RANKING_TTL = 15 * 60 * 1000;
     const PROJECTION_TTL = 24 * 60 * 60 * 1000;
+    const DAILY_TICK_HOUR_UTC = 18;
+    const DAILY_ALERTS = Object.freeze({
+        income: { minute: 0, notificationId: 6811, title: "Naughty Company — Daily Tick" },
+        employeeRisk: { minute: 10, notificationId: 6812, title: "Naughty Company — Employee Effectiveness" }
+    });
+    const EFFECTIVENESS_ALERT_THRESHOLD = -12;
     const STORE = {
         settings: "ncc:settings:v1",
         cache: "ncc:cache:v1",
@@ -36,8 +44,11 @@
         projections: "ncc:projections:v1",
         rankHistory: "ncc:rank-history:v1",
         starCohorts: "ncc:star-cohorts:v1",
-        layout: "ncc:layout:v1"
+        layout: "ncc:layout:v1",
+        dailyAlerts: "ncc:daily-alerts:v1"
     };
+    const STORE_KEYS = Object.values(STORE);
+    const LEGACY_FALLBACK_KEY = "ncc:pda-fallback-keys:v1";
     const DEFAULT_SETTINGS = {
         tornKey: "",
         tornStatsKey: "",
@@ -61,6 +72,7 @@
         projections: {},
         rankHistory: {},
         starCohorts: {},
+        dailyAlerts: {},
         loading: false,
         rankingLoading: false,
         projectionLoading: false,
@@ -71,9 +83,30 @@
         teamFilter: "",
         rankingsFilter: "",
         selectedTrendPeriod: null,
+        selectedTrendChart: "income-profit",
         runtimeMode: "desktop",
+        storageWarning: "",
         modal: null,
         autoRefreshId: null
+    };
+    const dailyAlertRuntime = {
+        timerId: null,
+        inFlight: new Set()
+    };
+    const storage = {
+        cache: {},
+        pda: null,
+        mode: "legacy",
+        initialized: false,
+        fallbackKeys: new Set()
+    };
+    let resolveFlutterReady;
+    const flutterReadyPromise = new Promise((resolve) => { resolveFlutterReady = resolve; });
+    const nativeRuntime = {
+        flutterReady: false,
+        isTornPDA: false,
+        confirmationComplete: false,
+        confirmationPromise: null
     };
 
     const asNumber = (value, fallback = 0) => {
@@ -126,6 +159,7 @@
         return `${Math.floor(seconds / 86400)}d ago`;
     };
     const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+    const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const sortRows = (rows, { key, dir }) => [...rows].sort((left, right) => {
         const a = typeof key === "function" ? key(left) : left[key];
         const b = typeof key === "function" ? key(right) : right[key];
@@ -143,21 +177,384 @@
         positionPriority: isObject(raw?.positionPriority) ? raw.positionPriority : {}
     });
 
-    async function gmGet(key, fallback) {
+    function getPageStorage() {
+        try {
+            return typeof localStorage === "undefined" ? null : localStorage;
+        } catch {
+            return null;
+        }
+    }
+
+    function getPdaStorage() {
+        try {
+            const api = typeof PDA_storage !== "undefined" ? PDA_storage : (typeof window !== "undefined" ? window.PDA_storage : null);
+            return api && typeof api.loadAll === "function" && typeof api.setMany === "function" && typeof api.delete === "function" ? api : null;
+        } catch {
+            return null;
+        }
+    }
+
+    async function legacyGet(key, fallback) {
         try {
             if (typeof GM_getValue === "function") return await GM_getValue(key, fallback);
             if (typeof GM !== "undefined" && typeof GM.getValue === "function") return await GM.getValue(key, fallback);
-            const raw = localStorage.getItem(key);
+            const pageStorage = getPageStorage();
+            const raw = pageStorage?.getItem(key);
             return raw === null ? fallback : JSON.parse(raw);
         } catch {
             return fallback;
         }
     }
 
-    async function gmSet(key, value) {
+    async function legacySet(key, value) {
         if (typeof GM_setValue === "function") return GM_setValue(key, value);
         if (typeof GM !== "undefined" && typeof GM.setValue === "function") return GM.setValue(key, value);
-        localStorage.setItem(key, JSON.stringify(value));
+        const pageStorage = getPageStorage();
+        if (!pageStorage) throw new Error("Local userscript storage is unavailable.");
+        pageStorage.setItem(key, JSON.stringify(value));
+    }
+
+    async function legacySetMany(values) {
+        await Promise.all(Object.entries(values).map(([key, value]) => legacySet(key, value)));
+    }
+
+    async function legacyDelete(key) {
+        try {
+            if (typeof GM_deleteValue === "function") return await GM_deleteValue(key);
+            if (typeof GM !== "undefined" && typeof GM.deleteValue === "function") return await GM.deleteValue(key);
+            getPageStorage()?.removeItem(key);
+        } catch {
+            return undefined;
+        }
+    }
+
+    async function loadLegacyValues() {
+        const entries = await Promise.all(STORE_KEYS.map(async (key) => {
+            const missing = `__ncc_legacy_missing__${key}`;
+            const value = await legacyGet(key, missing);
+            return [key, value === missing ? undefined : value];
+        }));
+        return Object.fromEntries(entries.filter(([, value]) => value !== undefined));
+    }
+
+    async function persistFallbackKeys() {
+        const keys = [...storage.fallbackKeys];
+        if (keys.length) await legacySet(LEGACY_FALLBACK_KEY, keys);
+        else await legacyDelete(LEGACY_FALLBACK_KEY);
+    }
+
+    function showStorageWarning(error) {
+        state.storageWarning = error?.code === "QuotaExceeded"
+            ? "TornPDA storage is full; newer companion data is safely using compatible userscript storage."
+            : "TornPDA storage is unavailable; compatible userscript storage is active.";
+    }
+
+    async function writeLegacyFallback(values, error) {
+        try {
+            await legacySetMany(values);
+            Object.keys(values).forEach((key) => storage.fallbackKeys.add(key));
+            await persistFallbackKeys();
+            showStorageWarning(error);
+        } catch {
+            state.storageWarning = "Companion storage is full or unavailable; the latest local change could not be saved.";
+        }
+    }
+
+    async function storeSetMany(values) {
+        const entries = Object.entries(values).filter(([key]) => STORE_KEYS.includes(key));
+        if (!entries.length) return;
+        const next = Object.fromEntries(entries);
+        Object.assign(storage.cache, next);
+        if (storage.mode === "pda" && storage.pda) {
+            try {
+                await storage.pda.setMany(next);
+                Object.keys(next).forEach((key) => storage.fallbackKeys.delete(key));
+                await persistFallbackKeys();
+                if (!storage.fallbackKeys.size) state.storageWarning = "";
+                return;
+            } catch (error) {
+                await writeLegacyFallback(next, error);
+                return;
+            }
+        }
+        try {
+            await legacySetMany(next);
+        } catch {
+            state.storageWarning = "Companion storage is unavailable; the latest local change could not be saved.";
+        }
+    }
+
+    async function storeSet(key, value) {
+        await storeSetMany({ [key]: value });
+    }
+
+    async function storeDelete(key) {
+        delete storage.cache[key];
+        if (storage.pda) {
+            try {
+                await storage.pda.delete(key);
+            } catch (error) {
+                showStorageWarning(error);
+            }
+        }
+        await legacyDelete(key);
+        storage.fallbackKeys.delete(key);
+        await persistFallbackKeys();
+    }
+
+    async function loadStoredValues() {
+        const pda = getPdaStorage();
+        if (!pda) {
+            const legacyValues = await loadLegacyValues();
+            storage.cache = legacyValues;
+            storage.mode = "legacy";
+            storage.initialized = true;
+            return storage.cache;
+        }
+        try {
+            const loaded = await pda.loadAll();
+            const pdaValues = isObject(loaded) ? loaded : {};
+            const legacyValues = await loadLegacyValues();
+            const savedFallbackKeys = await legacyGet(LEGACY_FALLBACK_KEY, []);
+            storage.fallbackKeys = new Set(Array.isArray(savedFallbackKeys) ? savedFallbackKeys.filter((key) => STORE_KEYS.includes(key)) : []);
+            storage.cache = { ...pdaValues };
+            const migrations = {};
+            STORE_KEYS.forEach((key) => {
+                const legacyHasValue = hasOwn(legacyValues, key);
+                const favorFallback = storage.fallbackKeys.has(key) && legacyHasValue;
+                if (favorFallback || !hasOwn(pdaValues, key)) {
+                    if (legacyHasValue) {
+                        storage.cache[key] = legacyValues[key];
+                        migrations[key] = legacyValues[key];
+                    }
+                }
+            });
+            storage.pda = pda;
+            storage.mode = "pda";
+            storage.initialized = true;
+            if (Object.keys(migrations).length) {
+                try {
+                    await pda.setMany(migrations);
+                    Object.keys(migrations).forEach((key) => storage.fallbackKeys.delete(key));
+                    await persistFallbackKeys();
+                } catch (error) {
+                    showStorageWarning(error);
+                }
+            }
+            return storage.cache;
+        } catch (error) {
+            const legacyValues = await loadLegacyValues();
+            storage.cache = legacyValues;
+            storage.pda = null;
+            storage.mode = "legacy";
+            storage.initialized = true;
+            showStorageWarning(error);
+            return storage.cache;
+        }
+    }
+
+    function getFlutterBridge() {
+        try {
+            const bridge = typeof window === "undefined" ? null : window.flutter_inappwebview;
+            return bridge && typeof bridge.callHandler === "function" ? bridge : null;
+        } catch {
+            return null;
+        }
+    }
+
+    function tornPdaUserAgent(userAgent = "") {
+        return /tornpda/i.test(userAgent);
+    }
+
+    function currentUserAgent() {
+        try {
+            return typeof navigator === "undefined" ? "" : navigator.userAgent || "";
+        } catch {
+            return "";
+        }
+    }
+
+    function refreshRuntimePresentation() {
+        if (typeof document === "undefined" || !document.getElementById(ROOT_ID)) return;
+        setTimeout(() => render(), 0);
+    }
+
+    async function confirmTornPDA({ retry = false } = {}) {
+        if (!nativeRuntime.flutterReady) return false;
+        if (nativeRuntime.confirmationComplete && !retry) return nativeRuntime.isTornPDA;
+        if (nativeRuntime.confirmationPromise) return nativeRuntime.confirmationPromise;
+        const bridge = getFlutterBridge();
+        if (!bridge) return false;
+        nativeRuntime.confirmationPromise = Promise.resolve(bridge.callHandler("isTornPDA"))
+            .then((response) => {
+                const previous = nativeRuntime.isTornPDA;
+                nativeRuntime.isTornPDA = response?.isTornPDA === true;
+                nativeRuntime.confirmationComplete = true;
+                if (previous !== nativeRuntime.isTornPDA || tornPdaUserAgent(currentUserAgent())) refreshRuntimePresentation();
+                return nativeRuntime.isTornPDA;
+            })
+            .catch(() => {
+                nativeRuntime.confirmationComplete = false;
+                return false;
+            })
+            .finally(() => {
+                nativeRuntime.confirmationPromise = null;
+            });
+        return nativeRuntime.confirmationPromise;
+    }
+
+    function markFlutterReady() {
+        if (!nativeRuntime.flutterReady) {
+            nativeRuntime.flutterReady = true;
+            resolveFlutterReady?.(true);
+        }
+        void confirmTornPDA({ retry: true });
+    }
+
+    function initializeNativeRuntime() {
+        if (typeof window === "undefined") return;
+        window.addEventListener("flutterInAppWebViewPlatformReady", markFlutterReady);
+        // document-idle scripts may start after the readiness event; a live bridge is then ready to confirm.
+        if (getFlutterBridge()) markFlutterReady();
+    }
+
+    async function waitForFlutterReady(timeout = 900) {
+        if (nativeRuntime.flutterReady) return true;
+        let timer;
+        const result = await Promise.race([
+            flutterReadyPromise,
+            new Promise((resolve) => { timer = setTimeout(() => resolve(false), timeout); })
+        ]);
+        if (timer) clearTimeout(timer);
+        return result === true || nativeRuntime.flutterReady;
+    }
+
+    async function nativeHttpGet(url, headers, timeout) {
+        if (!await waitForFlutterReady(Math.min(timeout, 1200))) throw new Error("TornPDA is not ready for native HTTP.");
+        if (!await confirmTornPDA()) throw new Error("Native TornPDA HTTP is unavailable.");
+        const bridge = getFlutterBridge();
+        if (!bridge) throw new Error("Native TornPDA HTTP is unavailable.");
+        let timer;
+        try {
+            return await Promise.race([
+                Promise.resolve(bridge.callHandler("PDA_httpGet", url, headers)),
+                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Request timed out.")), timeout); })
+            ]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+
+    async function callConfirmedPdaHandler(handler, ...args) {
+        if (!nativeRuntime.isTornPDA && !await confirmTornPDA()) return null;
+        const bridge = getFlutterBridge();
+        if (!bridge) return null;
+        try {
+            return await bridge.callHandler(handler, ...args);
+        } catch {
+            return null;
+        }
+    }
+
+    function pdaHandlerSucceeded(response) {
+        return response !== null && response !== undefined && response?.status !== "error";
+    }
+
+    function fallbackToastContainer() {
+        if (typeof document === "undefined" || !document.body) return null;
+        let container = document.getElementById("ncc-alert-toasts");
+        if (container) return container;
+        container = document.createElement("div");
+        container.id = "ncc-alert-toasts";
+        document.body.append(container);
+        return container;
+    }
+
+    function showDesktopToast(text, tone = "good", seconds = 10) {
+        const container = fallbackToastContainer();
+        if (!container) return false;
+        const toast = document.createElement("div");
+        toast.className = `ncc-alert-toast ${tone}`;
+        toast.setAttribute("role", "status");
+        toast.textContent = text;
+        toast.onclick = () => toast.remove();
+        container.append(toast);
+        setTimeout(() => toast.remove(), Math.max(3, seconds) * 1000);
+        return true;
+    }
+
+    async function showDailyToast(text, tone = "good") {
+        const colors = tone === "bad"
+            ? { bgColor: { a: 255, r: 125, g: 35, b: 47 }, textColor: { a: 255, r: 255, g: 245, b: 245 } }
+            : tone === "warn"
+                ? { bgColor: { a: 255, r: 112, g: 79, b: 20 }, textColor: { a: 255, r: 255, g: 246, b: 222 } }
+                : { bgColor: { a: 255, r: 18, g: 94, b: 74 }, textColor: { a: 255, r: 238, g: 255, b: 248 } };
+        const nativeResponse = await callConfirmedPdaHandler("showToast", {
+            text,
+            clickClose: true,
+            seconds: 10,
+            ...colors
+        });
+        if (pdaHandlerSucceeded(nativeResponse)) return true;
+        return showDesktopToast(text, tone, 10);
+    }
+
+    function companyPageUrl() {
+        try {
+            return `${window.location.origin}/companies.php`;
+        } catch {
+            return "https://www.torn.com/companies.php";
+        }
+    }
+
+    async function showDesktopNotification(title, text) {
+        const details = { title, text, timeout: 12000 };
+        try {
+            if (typeof GM_notification === "function") {
+                await Promise.resolve(GM_notification(details));
+                return true;
+            }
+            if (typeof GM !== "undefined" && typeof GM.notification === "function") {
+                await Promise.resolve(GM.notification(details));
+                return true;
+            }
+        } catch {
+            // Try the browser API below when the userscript manager declines a notification.
+        }
+        try {
+            if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+                new Notification(title, { body: text });
+                return true;
+            }
+        } catch {
+            return false;
+        }
+        return false;
+    }
+
+    async function showDailyNotification(alert, text) {
+        const nativeResponse = await callConfirmedPdaHandler("scheduleNotification", {
+            title: alert.title,
+            subtitle: text,
+            id: alert.notificationId,
+            timestamp: Date.now() + 1500,
+            overwriteID: true,
+            launchNativeToast: false,
+            urlCallback: companyPageUrl()
+        });
+        if (pdaHandlerSucceeded(nativeResponse)) return true;
+        return showDesktopNotification(alert.title, text);
+    }
+
+    async function deliverDailyAlert(kind, payload) {
+        const alert = DAILY_ALERTS[kind];
+        if (!alert) return false;
+        const tone = kind === "employeeRisk" && payload.risks?.length ? "bad" : payload.unavailable ? "warn" : "good";
+        const results = await Promise.allSettled([
+            showDailyToast(payload.text, tone),
+            showDailyNotification(alert, payload.text)
+        ]);
+        return results.some((result) => result.status === "fulfilled" && result.value === true);
     }
 
     function apiError(payload, source) {
@@ -188,14 +585,17 @@
                 GM.xmlHttpRequest(request);
                 return;
             }
-            if (typeof window !== "undefined" && typeof window.PDA_httpGet === "function") {
-                Promise.resolve(window.PDA_httpGet(url, request.headers)).then(onload, onerror);
+            const fetchFallback = () => {
+                fetch(url, { method, headers }).then(async (response) => {
+                    if (!response.ok) throw new Error(`Request failed (${response.status}).`);
+                    resolve(await response.text());
+                }).catch(onerror);
+            };
+            if (String(method).toUpperCase() === "GET" && (getFlutterBridge() || nativeRuntime.isTornPDA || tornPdaUserAgent(currentUserAgent()))) {
+                nativeHttpGet(url, request.headers, timeout).then(onload, fetchFallback);
                 return;
             }
-            fetch(url, { method, headers }).then(async (response) => {
-                if (!response.ok) throw new Error(`Request failed (${response.status}).`);
-                resolve(await response.text());
-            }).catch(onerror);
+            fetchFallback();
         });
     }
 
@@ -346,6 +746,168 @@
         };
     }
 
+    function utcDayKey(timestamp = Date.now()) {
+        const date = new Date(timestamp);
+        return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+    }
+
+    function dailyAlertPhaseTime(timestamp, minute) {
+        const date = new Date(timestamp);
+        return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), DAILY_TICK_HOUR_UTC, minute, 0, 0);
+    }
+
+    function isDailyAlertDue(timestamp, minute) {
+        return timestamp >= dailyAlertPhaseTime(timestamp, minute);
+    }
+
+    function dailyAlertDataSource(data, phaseTimestamp) {
+        const fetchedAt = asFinite(data?.fetchedAt);
+        if (fetchedAt !== null && fetchedAt >= phaseTimestamp) return { fresh: true, label: "Live refresh" };
+        if (fetchedAt === null) return { fresh: false, label: "CACHED — refresh time unavailable" };
+        const date = new Date(fetchedAt);
+        return { fresh: false, label: `CACHED — refreshed ${Number.isNaN(date.getTime()) ? "at an unknown time" : date.toISOString().replace(".000Z", "Z")}` };
+    }
+
+    function alertMoney(value) {
+        return asFinite(value) === null ? "unavailable" : formatMoney(value);
+    }
+
+    function alertCount(value) {
+        return asFinite(value) === null ? "unavailable" : formatNumber(value);
+    }
+
+    function buildDailyTickAlert(data, timestamp = Date.now()) {
+        const profile = data?.profile || {};
+        const financesNow = financials(data);
+        const source = dailyAlertDataSource(data, dailyAlertPhaseTime(timestamp, DAILY_ALERTS.income.minute));
+        return {
+            title: DAILY_ALERTS.income.title,
+            text: [
+                `Daily Income: ${alertMoney(financesNow.dailyIncome)}`,
+                `Daily Profit: ${alertMoney(financesNow.dailyProfit)}`,
+                `Daily Customer Count: ${alertCount(profile?.customers?.daily)}`,
+                source.label
+            ].join("\n"),
+            source
+        };
+    }
+
+    function employeeEffectivenessRisks(employees, threshold = EFFECTIVENESS_ALERT_THRESHOLD) {
+        return (Array.isArray(employees) ? employees : []).map((employee) => {
+            const addiction = asFinite(employee?.effectiveness?.addiction);
+            const inactivity = asFinite(employee?.effectiveness?.inactivity);
+            const issues = [];
+            if (addiction !== null && addiction < threshold) issues.push({ label: "Addiction", value: addiction });
+            if (inactivity !== null && inactivity < threshold) issues.push({ label: "Inactivity", value: inactivity });
+            return { id: String(employee?.id || ""), name: String(employee?.name || "Unknown"), addiction, inactivity, issues };
+        }).filter((employee) => employee.issues.length > 0);
+    }
+
+    function formatEffectivenessAlertValue(value) {
+        return `${value > 0 ? "+" : ""}${formatOptionalNumber(value, 1)}`;
+    }
+
+    function buildEmployeeRiskAlert(data, timestamp = Date.now()) {
+        const risks = employeeEffectivenessRisks(data?.employees);
+        const source = dailyAlertDataSource(data, dailyAlertPhaseTime(timestamp, DAILY_ALERTS.employeeRisk.minute));
+        const hasEffectiveness = data?.employeesAvailable !== false && (Array.isArray(data?.employees) ? data.employees : []).some((employee) => isObject(employee?.effectiveness));
+        const details = !hasEffectiveness
+            ? "Employee effectiveness data is unavailable from Torn, so no risk assessment could be made."
+            : risks.length
+            ? risks.map((employee) => `${employee.name} (${employee.issues.map((issue) => `${issue.label} ${formatEffectivenessAlertValue(issue.value)}`).join(", ")})`).join("; ")
+            : `No employees are below ${EFFECTIVENESS_ALERT_THRESHOLD} for Addiction or Inactivity effectiveness.`;
+        return {
+            title: DAILY_ALERTS.employeeRisk.title,
+            text: [`Employees below ${EFFECTIVENESS_ALERT_THRESHOLD}: ${details}`, source.label].join("\n"),
+            risks,
+            unavailable: !hasEffectiveness,
+            source
+        };
+    }
+
+    function dailyAlertPayload(kind, data, timestamp = Date.now()) {
+        return kind === "income" ? buildDailyTickAlert(data, timestamp) : buildEmployeeRiskAlert(data, timestamp);
+    }
+
+    function dailyAlertScope(data = state.data) {
+        return String(data?.profile?.id || "");
+    }
+
+    function dailyAlertRecord(data = state.data) {
+        const scope = dailyAlertScope(data);
+        const record = state.dailyAlerts?.[scope];
+        return isObject(record) ? record : {};
+    }
+
+    function dailyAlertInFlightKey(kind, data = state.data) {
+        return `${dailyAlertScope(data)}:${kind}`;
+    }
+
+    function pendingDailyAlertKinds(timestamp = Date.now(), data = state.data) {
+        const day = utcDayKey(timestamp);
+        const record = dailyAlertRecord(data);
+        return Object.entries(DAILY_ALERTS).filter(([kind, alert]) => isDailyAlertDue(timestamp, alert.minute) && record[kind] !== day && !dailyAlertRuntime.inFlight.has(dailyAlertInFlightKey(kind, data))).map(([kind]) => kind);
+    }
+
+    function nextDailyAlertTimestamp(timestamp = Date.now()) {
+        const today = Object.values(DAILY_ALERTS).map((alert) => dailyAlertPhaseTime(timestamp, alert.minute));
+        const tomorrow = timestamp + DAY;
+        const nextDay = Object.values(DAILY_ALERTS).map((alert) => dailyAlertPhaseTime(tomorrow, alert.minute));
+        return [...today, ...nextDay].sort((left, right) => left - right).find((candidate) => candidate > timestamp + 250) || nextDay[0];
+    }
+
+    function dailyAlertRefreshNeeded(kinds, timestamp = Date.now(), data = state.data) {
+        if (!data?.profile) return true;
+        return kinds.some((kind) => !dailyAlertDataSource(data, dailyAlertPhaseTime(timestamp, DAILY_ALERTS[kind].minute)).fresh);
+    }
+
+    async function markDailyAlertFired(kind, timestamp = Date.now()) {
+        const scope = dailyAlertScope();
+        if (!scope) return;
+        state.dailyAlerts = { ...state.dailyAlerts, [scope]: { ...dailyAlertRecord(), [kind]: utcDayKey(timestamp) } };
+        await storeSet(STORE.dailyAlerts, state.dailyAlerts);
+    }
+
+    async function runDailyTickAlerts({ refresh = false } = {}) {
+        const now = Date.now();
+        if (!String(state.settings.tornKey || "").trim()) return;
+        let pending = pendingDailyAlertKinds(now);
+        if (!pending.length) return;
+        if (refresh && dailyAlertRefreshNeeded(pending, now)) {
+            if (state.loading) return;
+            await refreshCore({ silent: true, suppressDailyAlerts: true });
+        }
+        if (!state.data?.profile) return;
+        const firedAt = Date.now();
+        pending = pendingDailyAlertKinds(firedAt);
+        for (const kind of pending) {
+            const inFlightKey = dailyAlertInFlightKey(kind);
+            dailyAlertRuntime.inFlight.add(inFlightKey);
+            try {
+                const payload = dailyAlertPayload(kind, state.data, firedAt);
+                if (await deliverDailyAlert(kind, payload)) await markDailyAlertFired(kind, firedAt);
+            } catch (error) {
+                console.warn("[Naughty Company Companion] Daily alert could not be delivered.", error);
+            } finally {
+                dailyAlertRuntime.inFlight.delete(inFlightKey);
+            }
+        }
+    }
+
+    function scheduleDailyTickAlerts() {
+        if (dailyAlertRuntime.timerId) clearTimeout(dailyAlertRuntime.timerId);
+        const delay = Math.max(1000, nextDailyAlertTimestamp() - Date.now() + 300);
+        dailyAlertRuntime.timerId = setTimeout(async () => {
+            await runDailyTickAlerts({ refresh: true });
+            scheduleDailyTickAlerts();
+        }, delay);
+    }
+
+    function resetDailyTickAlerts() {
+        scheduleDailyTickAlerts();
+        void runDailyTickAlerts({ refresh: true });
+    }
+
     function companyHistory(companyId = state.data?.profile?.id) {
         return Array.isArray(state.history?.[String(companyId)]) ? state.history[String(companyId)] : [];
     }
@@ -371,13 +933,15 @@
         };
     }
 
-    async function persistHistorySnapshot() {
+    async function persistHistorySnapshot({ persist = true } = {}) {
         const profile = state.data?.profile;
         if (!profile?.id) return;
         const id = String(profile.id);
         const period = reportingPeriod();
         const financesNow = financials();
         const stockNow = stockMetrics();
+        const rankingsNow = rankingMetrics();
+        const stockAvailable = state.data?.stockAvailable === true;
         const efficiencyRows = employeeRows().map((employee) => employee.currentEfficiency).filter((value) => value !== null);
         const row = {
             period,
@@ -388,9 +952,11 @@
             weeklyProfit: financesNow.weeklyProfit,
             funds: asFinite(profile.funds),
             rating: asFinite(profile.rating),
-            stockQuantity: stockNow.inStock,
-            stockValue: stockNow.saleValue,
+            stockQuantity: stockAvailable ? stockNow.inStock : null,
+            stockValue: stockAvailable ? stockNow.saleValue : null,
             averageEmployeeEfficiency: efficiencyRows.length ? efficiencyRows.reduce((sum, value) => sum + asNumber(value), 0) / efficiencyRows.length : null,
+            companyRank: trendNumber(rankingsNow?.rank),
+            companyRankTotal: trendNumber(rankingsNow?.total),
             stock: Object.fromEntries((Array.isArray(state.data?.stock) ? state.data.stock : []).map((item) => [String(item.id), {
                 inStock: asNumber(item.in_stock),
                 onOrder: asNumber(item.on_order)
@@ -398,7 +964,8 @@
         };
         const existing = companyHistory(id).filter((entry) => entry.period !== period && entry.period > period - 92 * DAY);
         state.history[id] = [...existing, row].sort((left, right) => left.period - right.period);
-        await gmSet(STORE.history, state.history);
+        if (persist) await storeSet(STORE.history, state.history);
+        return state.history;
     }
 
     function statFingerprint(companyTypeId, stats) {
@@ -523,14 +1090,20 @@
 
     async function saveSettings(patch = {}) {
         state.settings = deepMergeSettings({ ...state.settings, ...patch });
-        await gmSet(STORE.settings, state.settings);
+        await storeSet(STORE.settings, state.settings);
     }
 
     async function loadPersistedState() {
-        const [settings, layout, cache, history, rankings, projections, rankHistory, starCohorts] = await Promise.all([
-            gmGet(STORE.settings, {}), gmGet(STORE.layout, DEFAULT_LAYOUT), gmGet(STORE.cache, null), gmGet(STORE.history, {}),
-            gmGet(STORE.rankings, {}), gmGet(STORE.projections, {}), gmGet(STORE.rankHistory, {}), gmGet(STORE.starCohorts, {})
-        ]);
+        const stored = await loadStoredValues();
+        const settings = stored[STORE.settings] ?? {};
+        const layout = stored[STORE.layout] ?? DEFAULT_LAYOUT;
+        const cache = stored[STORE.cache] ?? null;
+        const history = stored[STORE.history] ?? {};
+        const rankings = stored[STORE.rankings] ?? {};
+        const projections = stored[STORE.projections] ?? {};
+        const rankHistory = stored[STORE.rankHistory] ?? {};
+        const starCohorts = stored[STORE.starCohorts] ?? {};
+        const dailyAlerts = stored[STORE.dailyAlerts] ?? {};
         state.settings = deepMergeSettings(settings);
         state.layout = { ...DEFAULT_LAYOUT, ...(isObject(layout) ? layout : {}) };
         state.cache = isObject(cache) ? cache : null;
@@ -539,6 +1112,7 @@
         state.projections = isObject(projections) ? projections : {};
         state.rankHistory = isObject(rankHistory) ? rankHistory : {};
         state.starCohorts = isObject(starCohorts) ? starCohorts : {};
+        state.dailyAlerts = isObject(dailyAlerts) ? dailyAlerts : {};
         state.selectedTab = state.settings.activeTab || "overview";
         if (state.cache?.profile?.id) state.data = state.cache;
     }
@@ -553,7 +1127,7 @@
         }) : []]));
     }
 
-    async function refreshCore({ silent = false } = {}) {
+    async function refreshCore({ silent = false, suppressDailyAlerts = false } = {}) {
         if (state.loading) return;
         if (!String(state.settings.tornKey || "").trim()) {
             state.error = "Add a Torn API key in Settings before refreshing.";
@@ -595,6 +1169,7 @@
         state.data = {
             profile,
             employees: Array.isArray(resultValue(employeesResult, "employees", [])) ? resultValue(employeesResult, "employees", []) : [],
+            employeesAvailable: employeesResult.status === "fulfilled",
             stock: Array.isArray(resultValue(stockResult, "stock", [])) ? resultValue(stockResult, "stock", []) : [],
             stockAvailable: stockResult.status === "fulfilled",
             news: Array.isArray(resultValue(newsResult, "news", [])) ? resultValue(newsResult, "news", []) : [],
@@ -602,11 +1177,13 @@
             fetchedAt: Date.now()
         };
         state.cache = state.data;
-        await Promise.all([gmSet(STORE.cache, state.cache), persistHistorySnapshot()]);
+        await persistHistorySnapshot({ persist: false });
+        await storeSetMany({ [STORE.cache]: state.cache, [STORE.history]: state.history });
         state.loading = false;
         state.status = `Updated ${timeAgo(state.data.fetchedAt)}.${messages.length ? ` ${messages.join(" ")}` : ""}`;
         render();
         void loadRankings();
+        if (!suppressDailyAlerts) void runDailyTickAlerts({ refresh: false });
     }
 
     async function loadRankings({ force = false } = {}) {
@@ -644,13 +1221,14 @@
             const savedCohort = state.starCohorts[id];
             if (!savedCohort || savedCohort.week !== currentWeek || isPostSundayReset(now)) {
                 state.starCohorts[id] = { week: currentWeek, capturedAt: now, counts: countStars(unique), source: isPostSundayReset(now) ? "post-reset" : "first-observed" };
-                await gmSet(STORE.starCohorts, state.starCohorts);
+                await storeSet(STORE.starCohorts, state.starCohorts);
             }
             const metrics = calculateRankingMetrics(unique, profile, state.starCohorts[id]?.counts);
             const prior = state.rankHistory[id];
             state.rankings[id] = { fetchedAt: now, companies: unique, typeId, total: unique.length, previousRank: prior?.rank ?? null };
             state.rankHistory[id] = { rank: metrics.rank, timestamp: now };
-            await Promise.all([gmSet(STORE.rankings, state.rankings), gmSet(STORE.rankHistory, state.rankHistory)]);
+            await persistHistorySnapshot({ persist: false });
+            await storeSetMany({ [STORE.rankings]: state.rankings, [STORE.rankHistory]: state.rankHistory, [STORE.history]: state.history });
             state.status = `Ranked ${formatNumber(unique.length)} ${profile.type.name} companies.${prior?.rank && metrics.rank ? ` Rank ${prior.rank === metrics.rank ? "unchanged" : metrics.rank < prior.rank ? "improved" : "fell"}.` : ""}`;
         } catch (error) {
             state.error = error?.message || "Unable to load company rankings.";
@@ -704,7 +1282,7 @@
             }
             const entries = Object.entries(state.projections).sort((left, right) => asNumber(right[1]?.fetchedAt) - asNumber(left[1]?.fetchedAt)).slice(0, 1200);
             state.projections = Object.fromEntries(entries);
-            await gmSet(STORE.projections, state.projections);
+            await storeSet(STORE.projections, state.projections);
             state.status = `Loaded ${formatNumber(pending.length)} TornStats efficiency projections.`;
         } catch (error) {
             state.error = error?.message || "Unable to load TornStats projections.";
@@ -722,15 +1300,20 @@
         return document.getElementById("ncc-content");
     }
 
-    function runtimeMode({ userAgent = "", width = 1024, height = 768, scale = 1 } = {}) {
-        const compactViewport = width <= 700 || height <= 520 || (scale > 1.1 && width <= 960);
-        return /tornpda/i.test(userAgent) || compactViewport ? "mobile" : "desktop";
+    function isCompactViewport({ width = 1024, height = 768, scale = 1 } = {}) {
+        return width <= 700 || height <= 520 || (scale > 1.1 && width <= 960);
+    }
+
+    function runtimeMode({ isTornPDA = false, userAgent = "", width = 1024, height = 768, scale = 1 } = {}) {
+        const pdaRuntime = Boolean(isTornPDA) || tornPdaUserAgent(userAgent);
+        return pdaRuntime || isCompactViewport({ width, height, scale }) ? "mobile" : "desktop";
     }
 
     function currentRuntimeMode() {
         const visualViewport = window.visualViewport;
         return runtimeMode({
-            userAgent: navigator.userAgent || "",
+            isTornPDA: nativeRuntime.isTornPDA,
+            userAgent: currentUserAgent(),
             width: Math.min(window.innerWidth, visualViewport?.width || window.innerWidth),
             height: Math.min(window.innerHeight, visualViewport?.height || window.innerHeight),
             scale: visualViewport?.scale || 1
@@ -777,7 +1360,7 @@
             width: Math.round(rect.width),
             height: Math.round(rect.height)
         };
-        await gmSet(STORE.layout, state.layout);
+        await storeSet(STORE.layout, state.layout);
     }
 
     function mountShell() {
@@ -788,9 +1371,18 @@
             <style>
                 #${ROOT_ID}, #${ROOT_ID} * { box-sizing: border-box; }
                 #${ROOT_ID} { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+                #ncc-alert-toasts { position:fixed; z-index:2147483647; top:max(12px, env(safe-area-inset-top)); right:max(12px, env(safe-area-inset-right)); display:grid; gap:8px; width:min(460px,calc(100vw - 24px)); pointer-events:none; }
+                .ncc-alert-toast { max-height:min(48vh,360px); overflow:auto; padding:11px 13px; border:1px solid #397866; border-radius:10px; background:#123e37; box-shadow:0 14px 36px #000a; color:#ecfff7; font-size:12px; font-weight:650; line-height:1.4; white-space:pre-wrap; pointer-events:auto; cursor:pointer; }
+                .ncc-alert-toast.bad { border-color:#9d4651; background:#4b222b; color:#fff0f1; }
+                .ncc-alert-toast.warn { border-color:#987229; background:#44361c; color:#fff3d1; }
                 #ncc-launcher { position:fixed; right:18px; top:18px; z-index:2147483646; width:52px; height:52px; border:1px solid #54dfbd; border-radius:17px; background:linear-gradient(145deg,#123e45,#122639); color:#dffcf4; box-shadow:0 12px 34px #0009; font-size:24px; cursor:pointer; }
-                #ncc-panel { position:fixed; z-index:2147483646; display:flex; flex-direction:column; overflow:hidden; min-width:430px; min-height:420px; border:1px solid #34516a; border-radius:16px; background:linear-gradient(150deg,#0d1a29 0%,#0a1421 60%,#101927 100%); color:#dbe7f4; box-shadow:0 18px 55px #000b; resize:both; }
+                #ncc-panel { position:fixed; z-index:2147483646; display:flex; flex-direction:column; overflow:hidden; min-width:430px; min-height:420px; border:1px solid #34516a; border-radius:16px; background:linear-gradient(150deg,#0d1a29 0%,#0a1421 60%,#101927 100%); color:#dbe7f4; box-shadow:0 18px 55px #000b; resize:none; }
                 #ncc-panel.ncc-hidden, #ncc-launcher.ncc-hidden { display:none; }
+                .ncc-resize-grip { position:absolute; z-index:4; bottom:0; width:24px; height:24px; margin:0; padding:0; border:0; background:transparent; touch-action:none; }
+                .ncc-resize-grip::before { position:absolute; right:5px; bottom:5px; width:11px; height:11px; content:""; border-right:2px solid #5cbfaf; border-bottom:2px solid #5cbfaf; opacity:.9; }
+                .ncc-resize-grip:hover::before, .ncc-resize-grip:focus-visible::before { border-color:#d9fff4; opacity:1; }
+                .ncc-resize-grip-left { left:0; cursor:nesw-resize; transform:scaleX(-1); }
+                .ncc-resize-grip-right { right:0; cursor:nwse-resize; }
                 .ncc-head { display:flex; align-items:center; gap:10px; min-height:55px; padding:10px 12px 9px 15px; border-bottom:1px solid #294157; background:linear-gradient(90deg,#112b3b,#102234 70%,#112030); cursor:move; user-select:none; }
                 .ncc-brand { min-width:0; flex:1; }
                 .ncc-brand strong { display:block; color:#dffcf4; font-size:13px; letter-spacing:.03em; }
@@ -803,7 +1395,8 @@
                 .ncc-tab { flex:0 0 auto; min-height:30px; padding:6px 10px; border:1px solid transparent; border-radius:7px; background:transparent; color:#8fa6b9; cursor:pointer; font-size:11px; font-weight:700; }
                 .ncc-tab:hover { color:#e0eef7; background:#14283a; }
                 .ncc-tab.active { background:#163a48; color:#dffcf4; }
-                #ncc-content { min-height:0; flex:1; overflow:auto; padding:12px; scrollbar-color:#3e657d #0b1623; }
+                #ncc-content { min-height:0; flex:1; overflow:auto; padding:12px; -ms-overflow-style:none; scrollbar-width:none; }
+                #ncc-content::-webkit-scrollbar, .ncc-modal::-webkit-scrollbar { display:none; }
                 .ncc-section { margin-bottom:12px; border:1px solid #29465d; border-radius:11px; background:#0d1b2a; overflow:hidden; }
                 .ncc-section-head { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:10px 11px; border-bottom:1px solid #243e54; background:#112235; }
                 .ncc-section-head h2, .ncc-section-head h3 { margin:0; color:#e4f3fa; font-size:12px; letter-spacing:.01em; }
@@ -895,11 +1488,12 @@
                 .ncc-trend-detail { margin-top:10px; }
                 .ncc-trend-detail .ncc-kv { min-width:0; }
                 .ncc-modal-backdrop { position:fixed; z-index:2147483647; inset:0; display:grid; place-items:center; padding:16px; background:#000a; }
-                .ncc-modal { width:min(720px,100%); max-height:min(700px,calc(100vh - 32px)); overflow:auto; border:1px solid #46718a; border-radius:14px; background:#0c1a29; box-shadow:0 24px 72px #000c; }
+                .ncc-modal { width:min(720px,100%); max-height:min(700px,calc(100vh - 32px)); overflow:auto; -ms-overflow-style:none; scrollbar-width:none; border:1px solid #46718a; border-radius:14px; background:#0c1a29; box-shadow:0 24px 72px #000c; }
                 .ncc-modal-head { display:flex; align-items:center; gap:8px; padding:12px; border-bottom:1px solid #29475e; background:#12283a; }
                 .ncc-modal-head h2 { flex:1; margin:0; color:#e3f8f2; font-size:13px; }
                 .ncc-modal-body { padding:12px; }
                 #${ROOT_ID}[data-runtime="mobile"] #ncc-panel { inset:max(4px, env(safe-area-inset-top)) 4px max(4px, env(safe-area-inset-bottom)) 4px !important; width:auto !important; height:auto !important; min-width:0; min-height:0; border-radius:11px; resize:none; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-resize-grip { display:none; }
                 #${ROOT_ID}[data-runtime="mobile"] #ncc-launcher { top:max(10px, env(safe-area-inset-top)); right:10px; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-head { min-height:54px; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-grid, #${ROOT_ID}[data-runtime="mobile"] .ncc-grid.ncc-grid-2 { grid-template-columns:1fr; }
@@ -916,7 +1510,7 @@
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-refresh-button { width:29px; padding:0; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-refresh-label { display:none; }
                 @media (max-width: 820px) { .ncc-grid, .ncc-grid.ncc-grid-3 { grid-template-columns:repeat(2,minmax(0,1fr)); } .ncc-summary-strip { grid-template-columns:repeat(3,minmax(120px,1fr)); } .ncc-team-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
-                @media (max-width: 680px) { #ncc-panel { inset:max(4px, env(safe-area-inset-top)) 4px max(4px, env(safe-area-inset-bottom)) 4px !important; width:auto !important; height:auto !important; min-width:0; min-height:0; border-radius:11px; resize:none; } #ncc-launcher { top:max(10px, env(safe-area-inset-top)); right:10px; } .ncc-head { min-height:54px; } .ncc-grid, .ncc-grid.ncc-grid-2 { grid-template-columns:1fr; } .ncc-card { min-height:73px; } .ncc-value { font-size:18px; } #ncc-content { padding:9px; } .ncc-table { white-space:normal; } .ncc-table th, .ncc-table td { padding:8px 6px; } .ncc-input[type="search"] { min-width:130px; flex:1; } .ncc-summary-strip { grid-template-columns:repeat(2,minmax(120px,1fr)); } .ncc-team-grid { grid-template-columns:1fr; } .ncc-team-card { min-height:96px; } .ncc-team-select { width:60%; } .ncc-refresh-button { width:29px; padding:0; } .ncc-refresh-label { display:none; } }
+                @media (max-width: 680px) { #ncc-panel { inset:max(4px, env(safe-area-inset-top)) 4px max(4px, env(safe-area-inset-bottom)) 4px !important; width:auto !important; height:auto !important; min-width:0; min-height:0; border-radius:11px; resize:none; } #ncc-launcher { top:max(10px, env(safe-area-inset-top)); right:10px; } .ncc-resize-grip { display:none; } .ncc-head { min-height:54px; } .ncc-grid, .ncc-grid.ncc-grid-2 { grid-template-columns:1fr; } .ncc-card { min-height:73px; } .ncc-value { font-size:18px; } #ncc-content { padding:9px; } .ncc-table { white-space:normal; } .ncc-table th, .ncc-table td { padding:8px 6px; } .ncc-input[type="search"] { min-width:130px; flex:1; } .ncc-summary-strip { grid-template-columns:repeat(2,minmax(120px,1fr)); } .ncc-team-grid { grid-template-columns:1fr; } .ncc-team-card { min-height:96px; } .ncc-team-select { width:60%; } .ncc-refresh-button { width:29px; padding:0; } .ncc-refresh-label { display:none; } }
             </style>
             <button id="ncc-launcher" class="ncc-hidden" type="button" aria-label="Open Naughty Company Companion">♜</button>
             <section id="ncc-panel" aria-label="Naughty Company Companion">
@@ -929,7 +1523,10 @@
                 </header>
                 <nav class="ncc-tabs" id="ncc-tabs"></nav>
                 <main id="ncc-content"></main>
-            </section>`;
+                <button class="ncc-resize-grip ncc-resize-grip-left" type="button" aria-label="Resize panel from the bottom left" title="Resize panel"></button>
+                <button class="ncc-resize-grip ncc-resize-grip-right" type="button" aria-label="Resize panel from the bottom right" title="Resize panel"></button>
+            </section>
+            <aside id="ncc-alert-toasts" aria-live="polite" aria-label="Company alerts"></aside>`;
         document.body.append(root);
         document.getElementById("ncc-launcher").addEventListener("click", () => toggleMinimized(false));
         bindDragAndResize();
@@ -954,6 +1551,17 @@
         const record = state.rankings?.[id];
         if (!record?.companies?.length || !state.data?.profile) return null;
         return calculateRankingMetrics(record.companies, state.data.profile, state.starCohorts?.[id]?.counts);
+    }
+
+    function companyRankSummary(metrics, profile) {
+        const ownId = String(profile?.id || "");
+        const starLevel = ratingOf(profile);
+        const starCompanies = (metrics?.ranked || []).filter((company) => ratingOf(company) === starLevel);
+        const starIndex = starCompanies.findIndex((company) => String(company?.id || "") === ownId);
+        return [
+            { rank: starIndex >= 0 ? starIndex + 1 : metrics?.rank ?? null, total: starCompanies.length, label: `Current rank in ${formatNumber(starLevel)}★ star level` },
+            { rank: metrics?.rank ?? null, total: metrics?.total ?? 0, label: "Current rank among same-type companies" }
+        ];
     }
 
     function renderOverview() {
@@ -1026,7 +1634,11 @@
         }).join("")}</div>` : `<div class="ncc-notice">No employee rows match the filter, or employee details are not available for this API key.</div>`;
         const values = rows.map((row) => row.currentEfficiency).filter((value) => value !== null);
         const affected = rows.filter((row) => asNumber(row.addiction) < 0 || asNumber(row.inactivity) < 0).length;
-        const runtimeLabel = mode === "mobile" ? /tornpda/i.test(navigator.userAgent || "") ? "TornPDA / compact cards" : "Compact mobile cards" : "Desktop detailed list";
+        const runtimeLabel = nativeRuntime.isTornPDA
+            ? "TornPDA (native confirmed) / compact cards"
+            : tornPdaUserAgent(currentUserAgent())
+                ? "TornPDA (awaiting native confirmation) / compact cards"
+                : mode === "mobile" ? "Compact viewport cards" : "Desktop detailed list";
         return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-team-filter" type="search" value="${escapeHtml(state.teamFilter)}" placeholder="Filter employee or role"><button class="ncc-button ncc-primary" data-action="load-projections" title="Sends work-stat triplets to TornStats (only after consent) and refreshes each employee’s role efficiency options" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button><button class="ncc-button" data-tab="planner">Open capacity planner</button><span class="ncc-help">${runtimeLabel} · ${formatNumber(rows.length)} staff · ${formatNumber(state.data?.profile?.employees?.capacity)} capacity · Avg. ${values.length ? formatNumber(values.reduce((sum, value) => sum + asNumber(value), 0) / values.length, 1) : "—"} effectiveness · ${formatNumber(affected)} with penalties</span></div>${section("Employee efficiency", table)}<p class="ncc-note">Current Eff. and assigned efficiency use TornStats role base + Torn’s non-working-stat effect delta when available; Torn’s direct total is only the fallback before projections load.</p>`;
     }
 
@@ -1105,11 +1717,7 @@
         rows = sortRows(rows, { key: keyMap[state.sort.rankings.key] || "rank", dir: state.sort.rankings.dir });
         const shown = rows.slice(0, 500);
         const slotSource = state.starCohorts?.[id]?.source === "post-reset" ? "Sunday post-reset slot snapshot" : "first observed this Torn week";
-        const starLevel = ratingOf(profile);
-        const starCompanies = metrics.ranked.filter((company) => ratingOf(company) === starLevel);
-        const foundStarRank = starCompanies.findIndex((company) => String(company.id) === id);
-        const starRank = foundStarRank >= 0 ? foundStarRank + 1 : metrics.rank;
-        const rankContext = `<div><b>${formatNumber(starRank)} out of ${formatNumber(starCompanies.length)}</b><small>${formatNumber(starRank)}/${formatNumber(starCompanies.length)} in your ${formatNumber(starLevel)}★ star level</small><small>${formatNumber(metrics.rank)} out of ${formatNumber(metrics.total)}</small><small>${formatNumber(metrics.rank)}/${formatNumber(metrics.total)} in same company type</small></div>`;
+        const rankContext = companyRankSummary(metrics, profile).map((field) => `<div><b>${formatNumber(field.rank)} / ${formatNumber(field.total)}</b><small>${escapeHtml(field.label)}</small></div>`).join("");
         const strip = `<div class="ncc-summary-strip">${rankContext}<div><b>${formatMoney(incomeOf(profile))}</b><small>Weekly income</small></div><div><b class="${metrics.nextGap === 0 ? "ncc-good" : "ncc-warn"}">${formatMoney(metrics.nextGap)}</b><small>Gap to ${metrics.nextStar || "next"}★</small></div><div><b class="ncc-good">${formatMoney(metrics.previousBuffer)}</b><small>Buffer to ${metrics.previousStar || "previous"}★</small></div><div><b>${formatPercent(metrics.percentile, 1)}</b><small>Health score / income rank</small></div><div><b class="${change.startsWith("▲") ? "ncc-good" : change.startsWith("▼") ? "ncc-bad" : ""}">${escapeHtml(change.split(" ")[0])}</b><small>${escapeHtml(change)}</small></div></div>`;
         const table = `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr>${sortHeader("Rank", "rank", "rankings")}${sortHeader("Company", "name", "rankings")}${sortHeader("Rating", "rating", "rankings")}${sortHeader("Daily income", "daily", "rankings")}${sortHeader("Weekly income", "weekly", "rankings")}</tr></thead><tbody>${shown.map((row) => `<tr class="${row.own ? "ncc-own-row" : ""}"><td>${formatNumber(row.rank)}</td><td><b>${escapeHtml(row.name || "Unknown")}</b>${row.own ? " <span class=\"ncc-pill good\">Your company</span>" : ""}</td><td>${formatNumber(row.rating)}★</td><td>${formatMoney(row.daily, true)}</td><td>${formatMoney(row.weekly, true)}</td></tr>`).join("")}</tbody></table></div>`;
         return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-rankings-filter" type="search" value="${escapeHtml(state.rankingsFilter)}" placeholder="Filter company or rank"><button class="ncc-button ncc-primary" data-action="load-rankings" title="Reloads all same-type Torn companies, then recalculates rank and star gaps" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading same-type rankings…" : "Refresh all same-type rankings"}</button><button class="ncc-button" data-action="show-health">View rank neighbors</button><span class="ncc-help">Updated ${timeAgo(record.fetchedAt)} · ${formatNumber(metrics.total)} companies</span></div>${section("Your company", `${strip}<p class="ncc-note">Health score is your weekly-income percentile among the same company type. Star slots use a ${slotSource}; the income gaps are observed planning values, not official Torn thresholds.</p>`)}${section("Same-type companies", `${table}${rows.length > shown.length ? `<p class="ncc-note">Showing the first ${formatNumber(shown.length)} filtered companies.</p>` : ""}`)}`;
@@ -1165,12 +1773,90 @@
         return `${dataNotice()}<div class="ncc-grid ncc-grid-3">${metricCard("Stock items", formatNumber(totals.inStock), `${formatNumber(totals.onOrder)} on order`)}${metricCard("Stock value", formatMoney(totals.saleValue), `${formatMoney(totals.costValue)} at cost`, "ncc-good")}${metricCard("Reported gross margin", formatMoney(totals.margin), `${formatMoney(totals.soldWorth)} sold worth`, totals.margin >= 0 ? "ncc-good" : "ncc-bad")}</div>${section("Stock & sales", table)}<p class="ncc-note">Stock difference is today’s in-stock amount minus the last local Torn reporting-day snapshot. It appears after a prior daily snapshot exists. Reported gross margin = sold worth − (cost × sold amount).</p>`;
     }
 
+    function trendNumber(value) {
+        return value === null || value === undefined || value === "" ? null : asFinite(value);
+    }
+
+    function trendChartDefinition(type = "income-profit") {
+        const charts = {
+            "income-profit": {
+                id: "income-profit",
+                label: "Income & Profit",
+                axisLabel: "Daily cash value",
+                zeroBaseline: true,
+                unavailable: "Daily Income is captured from Torn; Daily Profit is calculated locally from that reporting-day snapshot when its inputs are available.",
+                series: [
+                    { key: "dailyIncome", label: "Daily income", color: "#55ddb8", format: "money", tone: "good" },
+                    { key: "dailyProfit", label: "Daily profit", color: "#69aef7", format: "money" }
+                ]
+            },
+            stock: {
+                id: "stock",
+                label: "Stock",
+                axisLabel: "Current stock worth",
+                zeroBaseline: true,
+                unavailable: "Stock worth is captured only when Torn stock details are available at the local reporting-day snapshot.",
+                series: [
+                    { key: "stockValue", label: "Current stock worth", color: "#f4bf63", format: "money", tone: "warn" }
+                ],
+                detail: (row) => [{ label: "In-stock quantity", value: trendNumber(row?.stockQuantity) === null ? "Unavailable" : formatNumber(row.stockQuantity) }]
+            },
+            effectiveness: {
+                id: "effectiveness",
+                label: "Average employee effectiveness",
+                axisLabel: "Effectiveness",
+                unavailable: "Average employee effectiveness is captured only when employee details are available at the local reporting-day snapshot.",
+                series: [
+                    { key: "averageEmployeeEfficiency", label: "Avg employee effectiveness", color: "#b18cff", format: "effectiveness" }
+                ]
+            },
+            ranking: {
+                id: "ranking",
+                label: "Ranking history",
+                axisLabel: "Company rank (1 is best)",
+                invertY: true,
+                unavailable: "Company rank is captured after same-type rankings finish loading. It is never inferred from a current ranking or an older ranking cache.",
+                series: [
+                    { key: "companyRank", label: "Company rank", color: "#ff8fb1", format: "rank" }
+                ],
+                detail: (row) => {
+                    const total = trendNumber(row?.companyRankTotal);
+                    return total === null ? [] : [{ label: "Same-type companies", value: formatNumber(total) }];
+                }
+            }
+        };
+        return charts[type] || charts["income-profit"];
+    }
+
+    function formatTrendValue(value, series) {
+        const numeric = trendNumber(value);
+        if (numeric === null) return "Unavailable";
+        if (series.format === "money") return formatMoney(numeric, true);
+        if (series.format === "effectiveness") return formatNumber(numeric, 1);
+        if (series.format === "rank") return `#${formatNumber(numeric)}`;
+        return formatNumber(numeric);
+    }
+
+    function trendPointTooltip(row, type = "income-profit") {
+        const chart = trendChartDefinition(type);
+        const lines = [formatDateTime(row?.period), ...chart.series.map((series) => `${series.label}: ${formatTrendValue(row?.[series.key], series)}`)];
+        (chart.detail?.(row) || []).forEach((detail) => lines.push(`${detail.label}: ${detail.value}`));
+        return lines.join("\n");
+    }
+
+    function trendChartAvailability(history, type = "income-profit") {
+        const chart = trendChartDefinition(type);
+        const rows = Array.isArray(history) ? history.slice(-30) : [];
+        const series = chart.series.map((item) => ({ key: item.key, label: item.label, dataPoints: rows.filter((row) => trendNumber(row?.[item.key]) !== null).length }));
+        return { id: chart.id, label: chart.label, rowCount: rows.length, dataRows: rows.filter((row) => chart.series.some((item) => trendNumber(row?.[item.key]) !== null)).length, series };
+    }
+
     function trendPerformance(row, prior) {
         if (!prior) return { label: "Baseline", tone: "ncc-muted", detail: "First recorded day" };
         const checks = [[row.dailyIncome, prior.dailyIncome], [row.stockValue, prior.stockValue], [row.averageEmployeeEfficiency, prior.averageEmployeeEfficiency], [row.rating, prior.rating]];
         const score = checks.reduce((total, [current, previous]) => {
-            const a = asFinite(current);
-            const b = asFinite(previous);
+            const a = trendNumber(current);
+            const b = trendNumber(previous);
             return a === null || b === null || a === b ? total : total + (a > b ? 1 : -1);
         }, 0);
         return score > 0 ? { label: "Improving", tone: "ncc-good", detail: `${score} positive daily signals` } : score < 0 ? { label: "Declining", tone: "ncc-bad", detail: `${Math.abs(score)} negative daily signals` } : { label: "Mixed / steady", tone: "ncc-warn", detail: "No net daily signal change" };
@@ -1178,18 +1864,52 @@
 
     function trendDetail(row, prior) {
         const performance = trendPerformance(row, prior);
-        return `<div class="ncc-grid ncc-grid-3 ncc-trend-detail"><div class="ncc-kv"><span>Daily income</span><span>${formatMoney(row.dailyIncome)}</span></div><div class="ncc-kv"><span>Stock</span><span>${asFinite(row.stockValue) === null ? "—" : `${formatMoney(row.stockValue, true)} · ${formatNumber(row.stockQuantity)} qty`}</span></div><div class="ncc-kv"><span>Avg employee eff.</span><span>${formatOptionalNumber(row.averageEmployeeEfficiency, 1)}</span></div><div class="ncc-kv"><span>Star level</span><span>${formatNumber(row.rating)}★</span></div><div class="ncc-kv"><span>Daily profit</span><span class="${asFinite(row.dailyProfit) !== null && row.dailyProfit >= 0 ? "ncc-good" : "ncc-bad"}">${formatMoney(row.dailyProfit)}</span></div><div class="ncc-kv"><span>Performance vs previous day</span><span class="${performance.tone}">${performance.label}</span></div></div><p class="ncc-note">${escapeHtml(formatDateTime(row.period))} · ${escapeHtml(performance.detail)}. Select another point to compare that day with its prior local snapshot.</p>`;
+        const stockValue = trendNumber(row.stockValue);
+        const stockQuantity = trendNumber(row.stockQuantity);
+        const averageEfficiency = trendNumber(row.averageEmployeeEfficiency);
+        const rank = trendNumber(row.companyRank);
+        const rankTotal = trendNumber(row.companyRankTotal);
+        const dailyProfit = trendNumber(row.dailyProfit);
+        return `<div class="ncc-grid ncc-grid-3 ncc-trend-detail"><div class="ncc-kv"><span>Daily income</span><span>${trendNumber(row.dailyIncome) === null ? "—" : formatMoney(row.dailyIncome)}</span></div><div class="ncc-kv"><span>Stock</span><span>${stockValue === null ? "Unavailable" : `${formatMoney(stockValue, true)} · ${stockQuantity === null ? "—" : formatNumber(stockQuantity)} qty`}</span></div><div class="ncc-kv"><span>Avg employee eff.</span><span>${averageEfficiency === null ? "—" : formatNumber(averageEfficiency, 1)}</span></div><div class="ncc-kv"><span>Star level</span><span>${trendNumber(row.rating) === null ? "—" : `${formatNumber(row.rating)}★`}</span></div><div class="ncc-kv"><span>Daily profit</span><span class="${dailyProfit === null ? "ncc-muted" : dailyProfit >= 0 ? "ncc-good" : "ncc-bad"}">${dailyProfit === null ? "—" : formatMoney(dailyProfit)}</span></div><div class="ncc-kv"><span>Company rank</span><span>${rank === null ? "Unavailable" : `${formatNumber(rank)}${rankTotal === null ? "" : ` / ${formatNumber(rankTotal)}`}`}</span></div><div class="ncc-kv"><span>Performance vs previous day</span><span class="${performance.tone}">${performance.label}</span></div></div><p class="ncc-note">${escapeHtml(formatDateTime(row.period))} · ${escapeHtml(performance.detail)}. Hover any chart point for daily values, or select one to compare that day with its prior local snapshot.</p>`;
     }
 
-    function trendSvg(history) {
-        const rows = history.slice(-30);
-        if (rows.length < 2) return `<div class="ncc-empty">A chart with selectable daily points appears after at least two local daily snapshots.</div>`;
-        const selected = rows.find((row) => row.period === state.selectedTrendPeriod) || rows[rows.length - 1];
+    function trendLineSegments(rows, key, x, y) {
+        const segments = [];
+        let current = [];
+        rows.forEach((row, index) => {
+            const value = trendNumber(row?.[key]);
+            if (value === null) {
+                if (current.length) segments.push(current);
+                current = [];
+                return;
+            }
+            current.push(`${x(index).toFixed(1)},${y(value).toFixed(1)}`);
+        });
+        if (current.length) segments.push(current);
+        return segments;
+    }
+
+    function trendSvg(history, type = state.selectedTrendChart) {
+        const chart = trendChartDefinition(type);
+        const rows = Array.isArray(history) ? history.slice(-30) : [];
+        const availability = trendChartAvailability(rows, chart.id);
+        if (availability.dataRows < 2) {
+            const reason = availability.dataRows
+                ? `Only ${formatNumber(availability.dataRows)} local snapshot with ${chart.label.toLowerCase()} data is available; at least two are required for a line.`
+                : `No retained local snapshot contains ${chart.label.toLowerCase()} data yet.`;
+            return `<div class="ncc-empty"><div><b>${escapeHtml(chart.label)} history is unavailable.</b><p>${escapeHtml(reason)} ${escapeHtml(chart.unavailable)}</p></div></div>`;
+        }
+        const hasValue = (row) => chart.series.some((series) => trendNumber(row?.[series.key]) !== null);
+        const selectedCandidate = rows.find((row) => row.period === state.selectedTrendPeriod);
+        const selected = selectedCandidate && hasValue(selectedCandidate) ? selectedCandidate : [...rows].reverse().find(hasValue);
         const selectedIndex = rows.findIndex((row) => row.period === selected.period);
         const prior = selectedIndex > 0 ? rows[selectedIndex - 1] : null;
-        const values = rows.flatMap((row) => [asFinite(row.dailyIncome), asFinite(row.dailyProfit)]).filter((value) => value !== null);
-        const min = Math.min(0, ...values);
-        const max = Math.max(1, ...values);
+        const values = rows.flatMap((row) => chart.series.map((series) => trendNumber(row?.[series.key]))).filter((value) => value !== null);
+        const rawMin = Math.min(...values);
+        const rawMax = Math.max(...values);
+        const padding = Math.max(1, Math.abs(rawMax - rawMin) * 0.1, Math.abs(rawMax) * 0.02);
+        const min = chart.zeroBaseline ? Math.min(0, rawMin) : chart.invertY ? Math.max(1, rawMin - padding) : rawMin - padding;
+        const max = chart.zeroBaseline ? Math.max(1, rawMax) : rawMax + padding;
         const width = 700;
         const height = 230;
         const left = 68;
@@ -1197,21 +1917,39 @@
         const top = 14;
         const bottom = 34;
         const x = (index) => left + (index / Math.max(1, rows.length - 1)) * (width - left - right);
-        const y = (value) => height - bottom - ((asNumber(value) - min) / Math.max(1, max - min)) * (height - top - bottom);
-        const points = (key) => rows.map((row, index) => `${x(index).toFixed(1)},${y(row[key]).toFixed(1)}`).join(" ");
+        const y = (value) => {
+            const ratio = (value - min) / Math.max(1, max - min);
+            return height - bottom - (chart.invertY ? 1 - ratio : ratio) * (height - top - bottom);
+        };
         const ticks = Array.from({ length: 5 }, (_, index) => min + ((max - min) * index / 4));
         const dateIndexes = [...new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1])];
-        const grid = ticks.map((value) => `<g><line x1="${left}" x2="${width - right}" y1="${y(value)}" y2="${y(value)}" stroke="#2b4a61" stroke-dasharray="3 4"/><text x="${left - 7}" y="${y(value) + 3}" text-anchor="end" fill="#8ea5b6" font-size="9">${escapeHtml(formatMoney(value, true))}</text></g>`).join("");
+        const axisSeries = { format: chart.series[0].format };
+        const grid = ticks.map((value) => `<g><line x1="${left}" x2="${width - right}" y1="${y(value)}" y2="${y(value)}" stroke="#2b4a61" stroke-dasharray="3 4"/><text x="${left - 7}" y="${y(value) + 3}" text-anchor="end" fill="#8ea5b6" font-size="9">${escapeHtml(formatTrendValue(value, axisSeries))}</text></g>`).join("");
         const labels = dateIndexes.map((index) => `<text x="${x(index)}" y="${height - 12}" text-anchor="middle" fill="#8ea5b6" font-size="9">${escapeHtml(new Date(rows[index].period).toLocaleDateString(undefined, { month: "short", day: "numeric" }))}</text>`).join("");
-        const dailyPoints = rows.map((row, index) => `<circle class="ncc-chart-point ${row.period === selected.period ? "selected" : ""}" data-action="select-trend" data-period="${row.period}" cx="${x(index)}" cy="${y(row.dailyIncome)}" r="${row.period === selected.period ? 5 : 3.5}" fill="#55ddb8"><title>${escapeHtml(formatDateTime(row.period))}: ${escapeHtml(formatMoney(row.dailyIncome))}</title></circle>`).join("");
-        return `<div class="ncc-chart"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Daily income and profit trend; select an income point for daily details"><line x1="${left}" x2="${left}" y1="${top}" y2="${height - bottom}" stroke="#55748a"/><line x1="${left}" x2="${width - right}" y1="${height - bottom}" y2="${height - bottom}" stroke="#55748a"/>${grid}<polyline fill="none" stroke="#55ddb8" stroke-width="3" points="${points("dailyIncome")}"/><polyline fill="none" stroke="#69aef7" stroke-width="3" points="${points("dailyProfit")}"/>${dailyPoints}${labels}</svg></div><div class="ncc-inline" style="margin-top:7px"><span class="ncc-pill good">● Income</span><span class="ncc-pill">● Profit</span><span class="ncc-help">Select an income point · ${formatDateTime(rows[0].period)} → ${formatDateTime(rows[rows.length - 1].period)}</span></div>${trendDetail(selected, prior)}`;
+        const lines = chart.series.map((series) => trendLineSegments(rows, series.key, x, y).map((points) => `<polyline fill="none" stroke="${series.color}" stroke-width="3" stroke-linejoin="round" points="${points.join(" ")}"/>`).join("")).join("");
+        const points = chart.series.map((series) => rows.map((row, index) => {
+            const value = trendNumber(row?.[series.key]);
+            if (value === null) return "";
+            const tooltip = trendPointTooltip(row, chart.id);
+            return `<circle class="ncc-chart-point ${row.period === selected.period ? "selected" : ""}" data-action="select-trend" data-period="${row.period}" cx="${x(index)}" cy="${y(value)}" r="${row.period === selected.period ? 5 : 3.5}" fill="${series.color}" aria-label="${escapeHtml(tooltip)}"><title>${escapeHtml(tooltip)}</title></circle>`;
+        }).join("")).join("");
+        const legend = chart.series.map((series) => {
+            const count = availability.series.find((item) => item.key === series.key)?.dataPoints || 0;
+            return `<span class="ncc-pill ${series.tone || ""}" style="border-color:${series.color}">● ${escapeHtml(series.label)}${count ? "" : " unavailable"}</span>`;
+        }).join("");
+        return `<div class="ncc-chart"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(chart.label)} trend; hover or select any data point for daily values"><text x="${left}" y="10" fill="#8ea5b6" font-size="9">${escapeHtml(chart.axisLabel)}</text><line x1="${left}" x2="${left}" y1="${top}" y2="${height - bottom}" stroke="#55748a"/><line x1="${left}" x2="${width - right}" y1="${height - bottom}" y2="${height - bottom}" stroke="#55748a"/>${grid}${lines}${points}${labels}</svg></div><div class="ncc-inline" style="margin-top:7px">${legend}<span class="ncc-help">Hover any point for daily values · select a point for details · ${formatDateTime(rows[0].period)} → ${formatDateTime(rows[rows.length - 1].period)}</span></div>${trendDetail(selected, prior)}`;
     }
 
     function renderTrends() {
         const history = companyHistory();
         const latest = [...history].reverse().slice(0, 30);
-        const table = latest.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Reporting day</th><th>Daily income</th><th>Daily Profit</th><th>Weekly income</th><th>Weekly Profit</th><th>Rating</th><th>Funds</th></tr></thead><tbody>${latest.map((row) => `<tr><td>${escapeHtml(formatDateTime(row.period))}</td><td class="ncc-good">${formatMoney(row.dailyIncome)}</td><td class="${asNumber(row.dailyProfit) >= 0 ? "ncc-good" : "ncc-bad"}">${formatMoney(row.dailyProfit)}</td><td>${formatMoney(row.weeklyIncome)}</td><td>${formatMoney(row.weeklyProfit)}</td><td>${formatNumber(row.rating)}★</td><td>${formatMoney(row.funds)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice">The companion keeps one local snapshot per Torn reporting day (18:10 UTC). Refresh after installing to begin history.</div>`;
-        return `${dataNotice()}<div class="ncc-toolbar"><button class="ncc-button" data-action="export-history" ${history.length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="reset-history" ${history.length ? "" : "disabled"}>Clear local history</button><span class="ncc-help">${formatNumber(history.length)} retained daily snapshots · 92-day retention</span></div>${section("Income & Profit trend", trendSvg(history))}${section("Local company history", table)}<p class="ncc-note">History stays in your userscript storage. It is never uploaded by this companion. A missing Limited/director field stays blank rather than being treated as a value.</p>`;
+        const chart = trendChartDefinition(state.selectedTrendChart);
+        const chartOptions = ["income-profit", "stock", "effectiveness", "ranking"].map((type) => {
+            const item = trendChartDefinition(type);
+            return `<option value="${item.id}" ${item.id === chart.id ? "selected" : ""}>${escapeHtml(item.label)}</option>`;
+        }).join("");
+        const table = latest.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Reporting day</th><th>Daily income</th><th>Daily Profit</th><th>Weekly income</th><th>Weekly Profit</th><th>Rating</th><th>Funds</th></tr></thead><tbody>${latest.map((row) => `<tr><td>${escapeHtml(formatDateTime(row.period))}</td><td class="ncc-good">${trendNumber(row.dailyIncome) === null ? "—" : formatMoney(row.dailyIncome)}</td><td class="${trendNumber(row.dailyProfit) === null ? "ncc-muted" : row.dailyProfit >= 0 ? "ncc-good" : "ncc-bad"}">${trendNumber(row.dailyProfit) === null ? "—" : formatMoney(row.dailyProfit)}</td><td>${trendNumber(row.weeklyIncome) === null ? "—" : formatMoney(row.weeklyIncome)}</td><td>${trendNumber(row.weeklyProfit) === null ? "—" : formatMoney(row.weeklyProfit)}</td><td>${trendNumber(row.rating) === null ? "—" : `${formatNumber(row.rating)}★`}</td><td>${trendNumber(row.funds) === null ? "—" : formatMoney(row.funds)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice">The companion keeps one local snapshot per Torn reporting day (18:10 UTC). Refresh after installing to begin history.</div>`;
+        return `${dataNotice()}<div class="ncc-toolbar"><label class="ncc-inline"><span class="ncc-label">Chart view</span><select id="ncc-trend-chart" class="ncc-select" title="Choose the local daily metric to chart">${chartOptions}</select></label><button class="ncc-button" data-action="export-history" ${history.length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="reset-history" ${history.length ? "" : "disabled"}>Clear local history</button><span class="ncc-help">${formatNumber(history.length)} retained daily snapshots · 92-day retention</span></div>${section(`${chart.label} trend`, trendSvg(history, chart.id))}${section("Local company history", table)}<p class="ncc-note">History stays in your userscript storage and is never uploaded by this companion. Income comes from daily Torn snapshots; Profit is calculated locally from the available daily inputs. Stock worth is recorded only when stock details are available; average employee effectiveness is the displayed current-effectiveness average; company rank is recorded only after same-type rankings load. Older snapshots can lack these newer metrics and remain unavailable rather than being inferred.</p>`;
     }
 
     function renderSettings() {
@@ -1247,7 +1985,8 @@
         ];
         const tabsEl = document.getElementById("ncc-tabs");
         tabsEl.innerHTML = tabs.map(([id, label]) => `<button class="ncc-tab ${state.selectedTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("");
-        document.getElementById("ncc-status").textContent = state.loading ? "Refreshing company data…" : state.projectionLoading ? "Loading TornStats projections…" : state.rankingLoading ? state.status : state.status;
+        const activityStatus = state.loading ? "Refreshing company data…" : state.projectionLoading ? "Loading TornStats projections…" : state.rankingLoading ? state.status : state.status;
+        document.getElementById("ncc-status").textContent = [activityStatus, state.storageWarning].filter(Boolean).join(" ");
         const contentEl = content();
         contentEl.innerHTML = renderMain();
         if (state.modal === "health") contentEl.insertAdjacentHTML("beforeend", renderHealthModal());
@@ -1255,19 +1994,9 @@
         applyLayout();
     }
 
-    async function gmDelete(key) {
-        try {
-            if (typeof GM_deleteValue === "function") return GM_deleteValue(key);
-            if (typeof GM !== "undefined" && typeof GM.deleteValue === "function") return GM.deleteValue(key);
-            localStorage.removeItem(key);
-        } catch {
-            return undefined;
-        }
-    }
-
     async function toggleMinimized(minimized) {
         state.layout.minimized = minimized;
-        await gmSet(STORE.layout, state.layout);
+        await storeSet(STORE.layout, state.layout);
         applyLayout();
     }
 
@@ -1338,6 +2067,7 @@
             autoRefreshMinutes: refreshMinutes ? clamp(asNumber(refreshMinutes.value, 10), 2, 120) : state.settings.autoRefreshMinutes
         });
         resetAutoRefresh();
+        resetDailyTickAlerts();
         state.error = "";
         state.status = "Settings saved locally.";
         render();
@@ -1367,14 +2097,14 @@
         const id = String(state.data?.profile?.id || "");
         if (!id || !window.confirm("Clear this company’s local income and profit history? This cannot be undone.")) return;
         state.history[id] = [];
-        await gmSet(STORE.history, state.history);
+        await storeSet(STORE.history, state.history);
         state.status = "Local company history cleared.";
         render();
     }
 
     async function clearLocalData() {
         if (!window.confirm("Clear all Naughty Company Companion local data, including saved keys, history, ranking cache, plans, and projections?")) return;
-        await Promise.all(Object.values(STORE).map((key) => gmDelete(key)));
+        await Promise.all(Object.values(STORE).map((key) => storeDelete(key)));
         state.settings = { ...DEFAULT_SETTINGS };
         state.layout = { ...DEFAULT_LAYOUT };
         state.data = null;
@@ -1384,6 +2114,7 @@
         state.projections = {};
         state.rankHistory = {};
         state.starCohorts = {};
+        state.dailyAlerts = {};
         state.selectedTab = "overview";
         state.error = "";
         state.status = "All companion data was cleared from local userscript storage.";
@@ -1393,7 +2124,7 @@
 
     function resetPanelLayout() {
         state.layout = { ...DEFAULT_LAYOUT };
-        gmSet(STORE.layout, state.layout);
+        void storeSet(STORE.layout, state.layout);
         applyLayout();
         state.status = "Panel layout reset.";
         render();
@@ -1433,6 +2164,11 @@
             const next = document.getElementById("ncc-rankings-filter");
             if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); }
         };
+        const trendChart = document.getElementById("ncc-trend-chart");
+        if (trendChart) trendChart.onchange = () => {
+            state.selectedTrendChart = trendChartDefinition(trendChart.value).id;
+            render();
+        };
         root.querySelectorAll("[data-action]").forEach((element) => {
             element.onclick = async (event) => {
                 const action = element.getAttribute("data-action");
@@ -1466,6 +2202,7 @@
         const el = panel();
         if (!handle || !el) return;
         let drag = null;
+        let resize = null;
         handle.addEventListener("pointerdown", (event) => {
             if (event.button !== 0 || event.target.closest("button")) return;
             const rect = el.getBoundingClientRect();
@@ -1487,6 +2224,41 @@
         };
         handle.addEventListener("pointerup", endDrag);
         handle.addEventListener("pointercancel", endDrag);
+        [
+            [".ncc-resize-grip-left", "left"],
+            [".ncc-resize-grip-right", "right"]
+        ].forEach(([selector, edge]) => {
+            const grip = el.querySelector(selector);
+            if (!grip) return;
+            grip.addEventListener("pointerdown", (event) => {
+                if (event.button !== 0 || currentRuntimeMode() !== "desktop") return;
+                const rect = el.getBoundingClientRect();
+                resize = { edge, x: event.clientX, y: event.clientY, left: rect.left, right: rect.right, top: rect.top, width: rect.width, height: rect.height };
+                grip.setPointerCapture?.(event.pointerId);
+                event.preventDefault();
+            });
+            grip.addEventListener("pointermove", (event) => {
+                if (!resize) return;
+                const maxHeight = Math.max(420, window.innerHeight - resize.top);
+                const height = clamp(Math.round(resize.height + event.clientY - resize.y), 420, maxHeight);
+                if (resize.edge === "left") {
+                    const width = clamp(Math.round(resize.width - (event.clientX - resize.x)), 430, Math.max(430, resize.right));
+                    state.layout = { ...state.layout, x: Math.round(resize.right - width), y: Math.round(resize.top), width, height };
+                } else {
+                    const width = clamp(Math.round(resize.width + event.clientX - resize.x), 430, Math.max(430, window.innerWidth - resize.left));
+                    state.layout = { ...state.layout, x: Math.round(resize.left), y: Math.round(resize.top), width, height };
+                }
+                applyLayout();
+            });
+            const endResize = () => {
+                if (!resize) return;
+                resize = null;
+                void persistLayout();
+            };
+            grip.addEventListener("pointerup", endResize);
+            grip.addEventListener("pointercancel", endResize);
+            grip.addEventListener("lostpointercapture", endResize);
+        });
         el.addEventListener("pointerup", () => { void persistLayout(); });
         const handleRuntimeResize = () => {
             const priorMode = state.runtimeMode;
@@ -1511,6 +2283,7 @@
         if (state.data?.fetchedAt) state.status = `Showing cached data from ${timeAgo(state.data.fetchedAt)}.`;
         else state.status = "Configure a Torn API key to begin.";
         resetAutoRefresh();
+        resetDailyTickAlerts();
         render();
         if (String(state.settings.tornKey || "").trim()) void refreshCore({ silent: true });
         window.addEventListener("keydown", (event) => {
@@ -1524,10 +2297,14 @@
             }
         });
         window.addEventListener("beforeunload", () => { void persistLayout(); });
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden) void runDailyTickAlerts({ refresh: true });
+        });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendPerformance, runtimeMode };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
+    if (typeof window !== "undefined") initializeNativeRuntime();
     if (typeof document !== "undefined" && typeof window !== "undefined") {
         if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { void boot(); }, { once: true });
         else void boot();

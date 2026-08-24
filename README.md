@@ -55,7 +55,7 @@ The top **Refresh Torn data** action loads company profile, employees, stock, fu
 
 Role projections are optional. When enabled, the script sends each employee’s Manual labor, Intelligence, and Endurance values to TornStats with your TornStats API key to calculate role efficiencies. This is disclosed in Settings and is never performed until you opt in.
 
-All keys, cached data, staffing plans, rankings, and history stay in local userscript storage. The companion requests Torn data directly from `api.torn.com` and uses `www.tornstats.com` only for consented role projections. It does not upload history or plans elsewhere.
+All keys, cached data, staffing plans, rankings, and history stay in local per-script storage. The companion requests Torn data directly from `api.torn.com` and uses `www.tornstats.com` only for consented role projections. It does not upload history or plans elsewhere.
 
 Treat API keys as secrets. Revoke and replace a key if it may have been exposed.
 
@@ -74,6 +74,14 @@ weekly income − 7 × (advertising budget + total wages)
 ```
 
 Weekly profit omits sold stock cost because Torn exposes stock sales as a daily value. The health score is a visible weekly-income percentile, not a hidden company-quality value. Star thresholds and gaps are observed rank cutoffs, so use them as guidance rather than a guarantee.
+
+## TornPDA compatibility, storage, and daily alerts
+
+On TornPDA, the companion prefers the native per-script `PDA_storage` store. It loads the local namespace once at startup and uses batched native writes for companion settings, keys, cache, plans, rankings, history, layout, and alert state. Existing Tampermonkey/GM values are copied into `PDA_storage` only when the corresponding native value is missing, so an established native value is not overwritten. If native storage is unavailable or full, the companion keeps working through its compatible GM/local-storage fallback and displays a storage warning rather than discarding the change.
+
+Native runtime identity and compact presentation are deliberately separate. A TornPDA runtime is confirmed only after the `flutterInAppWebViewPlatformReady` bridge can answer `isTornPDA`; a user-agent hint or small screen alone does not claim native status. Confirmed TornPDA and compact desktop viewports use the touch-friendly, safe-area-aware card layout, while regular desktop uses the detailed layout. Network requests use the declared Tampermonkey grants when available and can use TornPDA's native `PDA_httpGet` only after that bridge has been confirmed.
+
+The daily-tick assistant runs while the Company page/userscript remains active. It produces an income/profit/customer alert at 18:00 UTC and an employee addiction/inactivity-risk alert at 18:10 UTC. When the current snapshot predates that tick, it silently refreshes first; otherwise the message labels the data as cached or unavailable. TornPDA receives a native scheduled notification, while desktop uses the userscript/browser-notification fallback, with an in-panel toast attempted in both environments. These are not guaranteed background alarms: app/browser suspension, a closed page, or lost connectivity can delay or prevent an alert until the script can run again. Each alert is recorded once per company per UTC day after successful delivery.
 
 ## Updating and verification
 
