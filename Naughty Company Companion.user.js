@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.2.0
+// @version      1.2.1
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/companies.php*
@@ -23,7 +23,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.0";
+    const VERSION = "1.2.1";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -2871,6 +2871,22 @@
         URL.revokeObjectURL(url);
     }
 
+    function utf8Base64(text) {
+        if (typeof TextEncoder === "undefined" || typeof btoa !== "function") return "";
+        const bytes = new TextEncoder().encode(String(text));
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        return btoa(binary);
+    }
+
+    async function shareCsvWithTornPDA(csv, fileName) {
+        if (!(nativeRuntime.isTornPDA || await confirmTornPDA())) return false;
+        const base64Data = utf8Base64(csv);
+        if (!base64Data) return false;
+        const response = await callConfirmedPdaHandler("shareFile", { base64Data, fileName });
+        return pdaHandlerSucceeded(response);
+    }
+
     async function downloadCompanyBackup() {
         const includeKeys = document.getElementById("ncc-backup-include-keys")?.checked === true;
         const backup = createCompanyBackupDocument(currentCompanyBackupStores(), { includeApiKeys: includeKeys });
@@ -2979,16 +2995,10 @@
         const headers = ["reporting_day_utc", "daily_income", "daily_net_profit", "weekly_income", "weekly_net_profit", "funds", "rating"];
         const esc = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
         const csv = [headers.join(","), ...rows.map((row) => [new Date(row.period).toISOString(), row.dailyIncome, row.dailyProfit, row.weeklyIncome, row.weeklyProfit, row.funds, row.rating].map(esc).join(","))].join("\n");
-        const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = `naughty-company-history-${profile?.id || "export"}.csv`;
-        document.body.append(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(url);
-        state.status = "Local history CSV exported.";
+        const fileName = `naughty-company-history-${profile?.id || "export"}.csv`;
+        const shared = await shareCsvWithTornPDA(csv, fileName);
+        if (!shared) downloadLocalTextFile(csv, fileName, "text/csv;charset=utf-8");
+        state.status = shared ? "History CSV opened in the TornPDA share sheet." : "Local history CSV exported.";
         render();
     }
 
@@ -3236,7 +3246,7 @@
         });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores, utf8Base64 };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
     if (typeof document !== "undefined" && typeof window !== "undefined") {

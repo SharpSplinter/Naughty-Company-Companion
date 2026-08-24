@@ -474,3 +474,10 @@ test("Company backups validate their namespace and preserve API keys unless rest
     assert.match(source, /data-action="download-company-backup"/);
     assert.match(source, /case "confirm-backup-restore"/);
 });
+
+test("Company CSV export uses the TornPDA share sheet with a local-download fallback", () => {
+    assert.equal(companion.utf8Base64("Income,Profit\n1,2"), "SW5jb21lLFByb2ZpdAoxLDI=");
+    assert.match(source, /async function shareCsvWithTornPDA\(csv, fileName\)/);
+    assert.match(source, /callConfirmedPdaHandler\("shareFile", \{ base64Data, fileName \}\)/);
+    assert.match(source, /History CSV opened in the TornPDA share sheet/);
+});
