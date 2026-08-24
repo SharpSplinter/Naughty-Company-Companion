@@ -1,0 +1,73 @@
+name: Bug report
+description: Report reproducible behavior that differs from the documented or expected result.
+title: "[Bug]: "
+labels:
+  - bug
+  - needs triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report a problem. Please remove API keys, account data, and other private information before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: Userscript version
+      description: Find this in the Naughty Company Companion panel or userscript manager.
+      placeholder: e.g. 1.2.3
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      options:
+        - Desktop browser with Tampermonkey
+        - TornPDA on Android
+        - TornPDA on iOS
+        - Other supported userscript runtime
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Browser, device, and OS
+      placeholder: e.g. Chrome 140 on Windows 11 or iPhone 15 on iOS
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or redacted console output
+      description: Do not include API keys, access tokens, private account data, or full API responses.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and removed private information.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

@@ -4,6 +4,10 @@ const path = require("node:path");
 const test = require("node:test");
 const companion = require("./Naughty Company Companion.user.js");
 const source = fs.readFileSync(path.join(__dirname, "Naughty Company Companion.user.js"), "utf8");
+const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
+assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Company-Companion/);
+assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Company-Companion\/main/);
+assert.doesNotMatch(source + readme, /xf4k31tx/);
 
 const company = (id, weekly, rating, daily = weekly / 7) => ({
     id,
@@ -480,9 +484,14 @@ test("Company backups validate their namespace and preserve API keys unless rest
     assert.match(source, /case "confirm-backup-restore"/);
 });
 
-test("Company CSV export uses the TornPDA share sheet with a local-download fallback", () => {
+test("Company backup and CSV exports use the TornPDA share sheet with a local-download fallback", () => {
     assert.equal(companion.utf8Base64("Income,Profit\n1,2"), "SW5jb21lLFByb2ZpdAoxLDI=");
-    assert.match(source, /async function shareCsvWithTornPDA\(csv, fileName\)/);
-    assert.match(source, /callConfirmedPdaHandler\("shareFile", \{ base64Data, fileName \}\)/);
+    assert.match(source, /async function shareTextWithTornPDA\(text, fileName\)/);
+    assert.match(source, /bridge\.callHandler\("shareFile", \{ base64Data, fileName \}\)/);
+    assert.match(source, /response\?\.status === "success"/);
+    assert.match(source, /async function exportTextFile\(text, fileName, type\)/);
+    assert.match(source, /exportInFlight: false/);
+    assert.match(source, /const result = await exportTextFile\(JSON\.stringify\(backup, null, 2\), backupFileName\(\), "application\/json;charset=utf-8"\)/);
+    assert.match(source, /Company backup opened in the TornPDA share sheet/);
     assert.match(source, /History CSV opened in the TornPDA share sheet/);
 });

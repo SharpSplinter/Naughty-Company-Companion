@@ -1,0 +1,56 @@
+name: Feature request
+description: Suggest a focused improvement for Company Companion.
+title: "[Feature]: "
+labels:
+  - enhancement
+  - needs triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing an idea. Please describe the Torn company-management workflow the feature would improve.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: What is difficult, missing, or time-consuming today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the result, controls, values, and any edge cases.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include existing script features, manual workflows, or other solutions.
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Affected runtime
+      multiple: true
+      options:
+        - Desktop browser with Tampermonkey
+        - TornPDA on Android
+        - TornPDA on iOS
+        - All runtimes
+    validations:
+      required: true
+  - type: textarea
+    id: mockup
+    attributes:
+      label: Examples or mockups
+      description: Optional screenshots, sample values, or a sketch of the intended flow.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and feature requests.
+          required: true
+        - label: I understand implementation may depend on Torn, TornStats, Tampermonkey, or TornPDA capabilities.
+          required: true

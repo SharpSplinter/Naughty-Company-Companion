@@ -2,6 +2,12 @@
 
 Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn company directors and managers. It brings income, profit, staffing efficiency, TornStats-based role planning, same-type income ranking, stock, and local trends into one local-first panel.
 
+## Project description
+
+**A local-first Tampermonkey and TornPDA companion for Torn company directors and managers, with income and profit insight, staffing-efficiency planning, stock tracking, rankings, and local trend history.**
+
+The project is an independent community userscript. It is not affiliated with Torn, TornStats, Tampermonkey, or TornPDA.
+
 ## Features
 
 ### Overview and income
@@ -41,7 +47,7 @@ Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn compa
 ## Installation
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) or use TornPDA’s userscript support.
-2. Open the [raw userscript](https://raw.githubusercontent.com/xf4k31tx/Naughty-Company-Companion/main/Naughty%20Company%20Companion.user.js) and install it.
+2. Open the [raw userscript](https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/main/Naughty%20Company%20Companion.user.js) and install it.
 3. Reload Torn and open the panel from the chess-piece launcher, or press <kbd>Alt</kbd>+<kbd>C</kbd>.
 4. In **Settings**, save a Torn API key, then select **Save keys & refresh Torn data**.
 5. Optionally save a TornStats API key and enable the explicit projection-consent toggle before selecting **Calculate TornStats role projections**.
@@ -82,7 +88,7 @@ On TornPDA, the companion prefers the native per-script `PDA_storage` store. It 
 
 Native runtime identity and compact presentation are deliberately separate. A TornPDA runtime is confirmed only after the `flutterInAppWebViewPlatformReady` bridge can answer `isTornPDA`; a user-agent hint or small screen alone does not claim native status. Confirmed TornPDA and compact desktop viewports use the touch-friendly, safe-area-aware card layout, while regular desktop uses the detailed layout. Network requests use the declared Tampermonkey grants when available and can use TornPDA's native `PDA_httpGet` only after that bridge has been confirmed. When TornPDA injects its documented API-key placeholder, the companion uses it automatically without showing or logging the value; an explicitly saved local Torn key takes precedence.
 
-Settings includes a **Backup & restore** section. It downloads a versioned Company-only JSON snapshot of local cache, history, rankings, projections, planner state, layout, settings, and alert state. API keys are excluded by default; including them on download and restoring them later both require separate explicit checkboxes. Loading validates the format, namespace, schema, and stored values before a second confirmation replaces current local Company data. Restoring never changes Torn or TornStats data, and the currently selected storage adapter remains in use. History CSV export opens TornPDA’s native share sheet in a confirmed TornPDA runtime and falls back to a normal local download everywhere else.
+Settings includes a **Backup & restore** section. It downloads a versioned Company-only JSON snapshot of local cache, history, rankings, projections, planner state, layout, settings, and alert state. API keys are excluded by default; including them on download and restoring them later both require separate explicit checkboxes. Loading validates the format, namespace, schema, and stored values before a second confirmation replaces current local Company data. Restoring never changes Torn or TornStats data, and the currently selected storage adapter remains in use. User-initiated JSON backup and history CSV exports call TornPDA’s native `shareFile({ base64Data, fileName })` handler, which opens the system share sheet; desktop falls back to a normal local download. On Android and iOS, choose Files or another destination from that system sheet—it is not a browser save-location picker. The companion waits for a confirmed native result, reports a native share failure rather than falsely claiming a download, and prevents overlapping share requests.
 
 The daily-tick assistant runs while the Company page/userscript remains active. It produces an 18:00 UTC alert with full Daily Income, Daily Profit, Daily Customer Count, Star Level, and integer Stock Difference versus the prior day, then an employee addiction/inactivity-risk alert at 18:10 UTC. When the current snapshot predates that tick, it silently refreshes first; otherwise the message labels the data as cached or unavailable. TornPDA receives native toast and notification delivery; the companion also keeps detailed in-panel toast cards stacked so one alert does not replace another. Desktop uses the userscript/browser-notification fallback. User-triggered save/refresh/export feedback also prefers the native toast handler with a desktop in-panel fallback.
 
@@ -109,3 +115,12 @@ node --test company-companion-regression.test.js
 
 - [Torn API documentation](https://www.torn.com/api.html)
 - [TornStats API documentation](https://www.tornstats.com/api)
+
+## Community and governance
+
+- [Contributing guide](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security policy](SECURITY.md)
+- [MIT License](LICENSE)
+- [Report a bug or request a feature](https://github.com/SharpSplinter/Naughty-Company-Companion/issues)
+- [Pull request template](.github/pull_request_template.md)

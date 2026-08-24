@@ -1,11 +1,14 @@
 // ==UserScript==
 // @name         Naughty Company Companion
-// @namespace    naughty-company-companion
-// @version      1.2.2
+// @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
+// @version      1.2.4
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
-// @author       Naughty
+// @author       SharpSplinter [315311]
 // @match        https://www.torn.com/companies.php*
 // @run-at       document-idle
+// @source       https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/main/Naughty%20Company%20Companion.user.js
+// @updateURL    https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/main/Naughty%20Company%20Companion.user.js
+// @downloadURL  https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/main/Naughty%20Company%20Companion.user.js
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -23,7 +26,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.2";
+    const VERSION = "1.2.4";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -100,6 +103,7 @@
         loading: false,
         rankingLoading: false,
         projectionLoading: false,
+        exportInFlight: false,
         status: "Configure a Torn API key to begin.",
         error: "",
         selectedTab: "overview",
@@ -2883,21 +2887,63 @@
         return btoa(binary);
     }
 
+    async function shareTextWithTornPDA(text, fileName) {
+        let bridge = getFlutterBridge();
+        if (!bridge && tornPdaUserAgent(currentUserAgent())) {
+            await waitForFlutterReady();
+            bridge = getFlutterBridge();
+        }
+        if (!bridge) return { native: false, shared: false };
+        if (!nativeRuntime.flutterReady) markFlutterReady();
+        if (!nativeRuntime.isTornPDA && !await confirmTornPDA()) return { native: false, shared: false };
+        const base64Data = utf8Base64(text);
+        if (!base64Data) return { native: true, shared: false, message: "This runtime could not encode the export." };
+        try {
+            const response = await bridge.callHandler("shareFile", { base64Data, fileName });
+            if (response?.status === "success") return { native: true, shared: true };
+            return { native: true, shared: false, message: String(response?.message || "TornPDA could not open its share sheet.") };
+        } catch (error) {
+            warningLog("export:native share failed", { reason: safeDiagnosticError(error) });
+            return { native: true, shared: false, message: "TornPDA could not open its share sheet." };
+        }
+    }
+
+    async function exportTextFile(text, fileName, type) {
+        const native = await shareTextWithTornPDA(text, fileName);
+        if (native.shared) return { transport: "share" };
+        if (native.native) return { transport: "failed", message: native.message };
+        downloadLocalTextFile(text, fileName, type);
+        return { transport: "download" };
+    }
+
     async function shareCsvWithTornPDA(csv, fileName) {
-        if (!(nativeRuntime.isTornPDA || await confirmTornPDA())) return false;
-        const base64Data = utf8Base64(csv);
-        if (!base64Data) return false;
-        const response = await callConfirmedPdaHandler("shareFile", { base64Data, fileName });
-        return pdaHandlerSucceeded(response);
+        return (await shareTextWithTornPDA(csv, fileName)).shared;
     }
 
     async function downloadCompanyBackup() {
+        if (state.exportInFlight) return false;
         const includeKeys = document.getElementById("ncc-backup-include-keys")?.checked === true;
-        const backup = createCompanyBackupDocument(currentCompanyBackupStores(), { includeApiKeys: includeKeys });
-        downloadLocalTextFile(JSON.stringify(backup, null, 2), backupFileName(), "application/json;charset=utf-8");
-        state.status = includeKeys ? "Local Company backup downloaded with opted-in API keys." : "Local Company backup downloaded without API keys.";
+        state.exportInFlight = true;
         render();
-        void showFeedbackToast(includeKeys ? "Company backup downloaded with opted-in API keys." : "Company backup downloaded without API keys.", "good", 6);
+        try {
+            const backup = createCompanyBackupDocument(currentCompanyBackupStores(), { includeApiKeys: includeKeys });
+            const result = await exportTextFile(JSON.stringify(backup, null, 2), backupFileName(), "application/json;charset=utf-8");
+            if (result.transport === "failed") {
+                state.error = result.message || "TornPDA could not open the native share sheet. No backup was exported.";
+                state.status = "Company backup was not exported.";
+                render();
+                void showFeedbackToast(state.error, "bad", 6);
+                return false;
+            }
+            const detail = includeKeys ? "with opted-in API keys." : "without API keys.";
+            state.status = result.transport === "share" ? "Company backup opened in the TornPDA share sheet " + detail : "Local Company backup downloaded " + detail;
+            render();
+            void showFeedbackToast(state.status, "good", 6);
+            return true;
+        } finally {
+            state.exportInFlight = false;
+            render();
+        }
     }
 
     function readBackupFileText(file) {
@@ -2993,17 +3039,32 @@
     }
 
     async function exportHistory() {
+        if (state.exportInFlight) return false;
         const profile = state.data?.profile;
         const rows = companyHistory(profile?.id);
         if (!rows.length) return;
-        const headers = ["reporting_day_utc", "daily_income", "daily_net_profit", "weekly_income", "weekly_net_profit", "funds", "rating"];
-        const esc = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-        const csv = [headers.join(","), ...rows.map((row) => [new Date(row.period).toISOString(), row.dailyIncome, row.dailyProfit, row.weeklyIncome, row.weeklyProfit, row.funds, row.rating].map(esc).join(","))].join("\n");
-        const fileName = `naughty-company-history-${profile?.id || "export"}.csv`;
-        const shared = await shareCsvWithTornPDA(csv, fileName);
-        if (!shared) downloadLocalTextFile(csv, fileName, "text/csv;charset=utf-8");
-        state.status = shared ? "History CSV opened in the TornPDA share sheet." : "Local history CSV exported.";
+        state.exportInFlight = true;
         render();
+        try {
+            const headers = ["reporting_day_utc", "daily_income", "daily_net_profit", "weekly_income", "weekly_net_profit", "funds", "rating"];
+            const esc = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+            const csv = [headers.join(","), ...rows.map((row) => [new Date(row.period).toISOString(), row.dailyIncome, row.dailyProfit, row.weeklyIncome, row.weeklyProfit, row.funds, row.rating].map(esc).join(","))].join("\n");
+            const fileName = `naughty-company-history-${profile?.id || "export"}.csv`;
+            const result = await exportTextFile(csv, fileName, "text/csv;charset=utf-8");
+            if (result.transport === "failed") {
+                state.error = result.message || "TornPDA could not open the native share sheet. No CSV was exported.";
+                state.status = "History CSV was not exported.";
+                render();
+                void showFeedbackToast(state.error, "bad", 6);
+                return false;
+            }
+            state.status = result.transport === "share" ? "History CSV opened in the TornPDA share sheet." : "Local history CSV exported.";
+            render();
+            return true;
+        } finally {
+            state.exportInFlight = false;
+            render();
+        }
     }
 
     async function resetHistory() {
