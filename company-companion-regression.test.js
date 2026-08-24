@@ -286,3 +286,25 @@ test("rankings flow through the main panel while all Company scroll regions stay
     assert.doesNotMatch(source, /\.ncc-table-wrap\s*\{[^}]*max-height:/);
     assert.doesNotMatch(source, /\.ncc-table-wrap\s*\{[^}]*overflow:auto/);
 });
+
+test("compact responsive layout uses actual panel width and keeps bounds inside the visible viewport", () => {
+    assert.equal(companion.isCompactLayout({ containerWidth: 760, viewportWidth: 1440 }), true);
+    assert.equal(companion.isCompactLayout({ containerWidth: 940, viewportWidth: 1440 }), false);
+    assert.equal(companion.isCompactLayout({ containerWidth: 940, viewportWidth: 1440, forceCompact: true }), true);
+
+    const bounds = companion.boundedPanelLayout({ x: 900, y: 700, width: 940, height: 860 }, { width: 800, height: 600 });
+    assert.equal(bounds.width, 772);
+    assert.equal(bounds.height, 572);
+    assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 800);
+    assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= 600);
+});
+
+test("compact Company tables stack into labeled cards and tabs wrap without horizontal scrolling", () => {
+    assert.match(source, /data-compact-layout="true"\] \.ncc-tabs \{ display:grid; grid-template-columns:repeat\(4,minmax\(0,1fr\)\); overflow:visible;/);
+    assert.match(source, /data-compact-layout="true"\] \.ncc-stack-wrap \{ overflow:visible;/);
+    assert.match(source, /data-compact-layout="true"\] \.ncc-stack-table tbody tr \{ display:block;/);
+    assert.match(source, /data-compact-layout="true"\] \.ncc-stack-table td::before .*content:attr\(data-label\)/);
+    assert.match(source, /ncc-stack-table/);
+    assert.match(source, /stackCell\("Current stock worth"/);
+    assert.match(source, /stackCell\("Reporting day"/);
+});

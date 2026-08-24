@@ -91,7 +91,7 @@ The browser/TornPDA console shows `[Naughty Company Companion]` startup/runtime,
 
 ## Scrolling
 
-The main panel owns vertical page flow, including the full Same-type companies ranking table. Table, tab, summary, toast, and modal scrollbars are visually hidden while mouse-wheel, keyboard, and TornPDA touch scrolling remain available; tables retain horizontal scrolling where needed.
+The main panel owns vertical page flow, including the full Same-type companies ranking table. Table, tab, summary, toast, and modal scrollbars are visually hidden while mouse-wheel, keyboard, and TornPDA touch scrolling remain available. At an actual panel or visible viewport width of 820px or less (and throughout TornPDA), tabs wrap, summary/cards reflow, and Planner, Rankings, Stock, history, and rank-neighbor tables become labeled stacked cards with no horizontal table scroll; wider desktop panels retain detailed tables.
 
 ## Updating and verification
 

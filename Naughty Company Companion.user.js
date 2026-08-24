@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.1.7
+// @version      1.1.8
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/companies.php*
@@ -23,7 +23,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.1.7";
+    const VERSION = "1.1.8";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -48,6 +48,8 @@
         }
     });
     const EFFECTIVENESS_ALERT_THRESHOLD = -12;
+    const COMPACT_LAYOUT_MAX_WIDTH = 820;
+    const PANEL_MARGIN = 14;
     const DIAGNOSTIC_PREFIX = "[Naughty Company Companion]";
     const STORE = {
         settings: "ncc:settings:v1",
@@ -1502,6 +1504,51 @@
         return document.getElementById("ncc-content");
     }
 
+    function isCompactLayout({ containerWidth, viewportWidth, forceCompact = false } = {}) {
+        const widths = [containerWidth, viewportWidth].map(Number).filter(Number.isFinite);
+        return forceCompact || (widths.length > 0 && Math.min(...widths) <= COMPACT_LAYOUT_MAX_WIDTH);
+    }
+
+    function visibleViewport() {
+        const visualViewport = window.visualViewport;
+        const windowWidth = Math.max(1, asNumber(window.innerWidth, 1024));
+        const windowHeight = Math.max(1, asNumber(window.innerHeight, 768));
+        return {
+            width: Math.max(1, Math.floor(Math.min(windowWidth, asNumber(visualViewport?.width, windowWidth)))),
+            height: Math.max(1, Math.floor(Math.min(windowHeight, asNumber(visualViewport?.height, windowHeight))))
+        };
+    }
+
+    function boundedPanelLayout(layout = DEFAULT_LAYOUT, { width = 1024, height = 768, margin = PANEL_MARGIN } = {}) {
+        const viewportWidth = Math.max(1, asNumber(width, 1024));
+        const viewportHeight = Math.max(1, asNumber(height, 768));
+        const safeMargin = Math.max(0, Math.min(asNumber(margin, PANEL_MARGIN), Math.floor(Math.min(viewportWidth, viewportHeight) / 4)));
+        const maxWidth = Math.max(1, viewportWidth - safeMargin * 2);
+        const maxHeight = Math.max(1, viewportHeight - safeMargin * 2);
+        const panelWidth = clamp(asNumber(layout?.width, DEFAULT_LAYOUT.width), Math.min(430, maxWidth), maxWidth);
+        const panelHeight = clamp(asNumber(layout?.height, DEFAULT_LAYOUT.height), Math.min(420, maxHeight), maxHeight);
+        const minX = Math.min(safeMargin, Math.max(0, viewportWidth - panelWidth));
+        const minY = Math.min(safeMargin, Math.max(0, viewportHeight - panelHeight));
+        return {
+            width: panelWidth,
+            height: panelHeight,
+            x: layout?.x === null || layout?.x === undefined ? null : clamp(asNumber(layout.x), minX, Math.max(minX, viewportWidth - panelWidth - safeMargin)),
+            y: clamp(asNumber(layout?.y, PANEL_MARGIN), minY, Math.max(minY, viewportHeight - panelHeight - safeMargin)),
+            margin: safeMargin,
+            minimized: Boolean(layout?.minimized)
+        };
+    }
+
+    function applyCompactLayout(mode) {
+        const root = document.getElementById(ROOT_ID);
+        const el = panel();
+        if (!root || !el) return false;
+        const viewport = visibleViewport();
+        const compact = isCompactLayout({ containerWidth: el.getBoundingClientRect().width, viewportWidth: viewport.width, forceCompact: mode === "mobile" });
+        root.setAttribute("data-compact-layout", compact ? "true" : "false");
+        return compact;
+    }
+
     function isCompactViewport({ width = 1024, height = 768, scale = 1 } = {}) {
         return width <= 700 || height <= 520 || (scale > 1.1 && width <= 960);
     }
@@ -1534,21 +1581,22 @@
         const launcher = document.getElementById("ncc-launcher");
         if (!el || !launcher) return;
         const mode = applyRuntimeMode();
-        const layout = state.layout;
-        el.style.width = `${clamp(asNumber(layout.width, DEFAULT_LAYOUT.width), 430, Math.max(430, window.innerWidth - 28))}px`;
-        el.style.height = `${clamp(asNumber(layout.height, DEFAULT_LAYOUT.height), 420, Math.max(420, window.innerHeight - 28))}px`;
-        if (layout.x === null || layout.x === undefined) {
+        const layout = boundedPanelLayout(state.layout, visibleViewport());
+        el.style.width = `${layout.width}px`;
+        el.style.height = `${layout.height}px`;
+        if (layout.x === null) {
             el.style.left = "auto";
-            el.style.right = "18px";
+            el.style.right = `${layout.margin}px`;
         } else {
-            el.style.left = `${clamp(asNumber(layout.x), 0, Math.max(0, window.innerWidth - asNumber(layout.width)))}px`;
+            el.style.left = `${layout.x}px`;
             el.style.right = "auto";
         }
-        el.style.top = `${clamp(asNumber(layout.y, 18), 0, Math.max(0, window.innerHeight - 80))}px`;
+        el.style.top = `${layout.y}px`;
         el.classList.toggle("ncc-compact", mode === "mobile");
         launcher.classList.toggle("ncc-compact", mode === "mobile");
         el.classList.toggle("ncc-hidden", Boolean(layout.minimized));
         launcher.classList.toggle("ncc-hidden", !layout.minimized);
+        applyCompactLayout(mode);
     }
 
     async function persistLayout() {
@@ -1579,7 +1627,7 @@
                 .ncc-alert-toast.bad { border-color:#9d4651; background:#4b222b; color:#fff0f1; }
                 .ncc-alert-toast.warn { border-color:#987229; background:#44361c; color:#fff3d1; }
                 #ncc-launcher { position:fixed; right:18px; top:18px; z-index:2147483646; width:52px; height:52px; border:1px solid #54dfbd; border-radius:17px; background:linear-gradient(145deg,#123e45,#122639); color:#dffcf4; box-shadow:0 12px 34px #0009; font-size:24px; cursor:pointer; }
-                #ncc-panel { position:fixed; z-index:2147483646; display:flex; flex-direction:column; overflow:hidden; min-width:430px; min-height:420px; border:1px solid #34516a; border-radius:16px; background:linear-gradient(150deg,#0d1a29 0%,#0a1421 60%,#101927 100%); color:#dbe7f4; box-shadow:0 18px 55px #000b; resize:none; }
+                #ncc-panel { position:fixed; z-index:2147483646; display:flex; flex-direction:column; overflow:hidden; min-width:430px; min-height:420px; max-width:calc(100vw - 8px); max-height:calc(100vh - 8px); border:1px solid #34516a; border-radius:16px; background:linear-gradient(150deg,#0d1a29 0%,#0a1421 60%,#101927 100%); color:#dbe7f4; box-shadow:0 18px 55px #000b; resize:none; }
                 #ncc-panel.ncc-hidden, #ncc-launcher.ncc-hidden { display:none; }
                 .ncc-resize-grip { position:absolute; z-index:4; bottom:0; width:24px; height:24px; margin:0; padding:0; border:0; background:transparent; touch-action:none; }
                 .ncc-resize-grip::before { position:absolute; right:5px; bottom:5px; width:11px; height:11px; content:""; border-right:2px solid #5cbfaf; border-bottom:2px solid #5cbfaf; opacity:.9; }
@@ -1598,7 +1646,7 @@
                 .ncc-tab { flex:0 0 auto; min-height:30px; padding:6px 10px; border:1px solid transparent; border-radius:7px; background:transparent; color:#8fa6b9; cursor:pointer; font-size:11px; font-weight:700; }
                 .ncc-tab:hover { color:#e0eef7; background:#14283a; }
                 .ncc-tab.active { background:#163a48; color:#dffcf4; }
-                #ncc-content { min-height:0; flex:1; overflow:auto; padding:12px; }
+                #ncc-content { min-width:0; min-height:0; flex:1; overflow-x:hidden; overflow-y:auto; padding:12px; }
                 .ncc-section { margin-bottom:12px; border:1px solid #29465d; border-radius:11px; background:#0d1b2a; overflow:hidden; }
                 .ncc-section-head { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:10px 11px; border-bottom:1px solid #243e54; background:#112235; }
                 .ncc-section-head h2, .ncc-section-head h3 { margin:0; color:#e4f3fa; font-size:12px; letter-spacing:.01em; }
@@ -1694,6 +1742,25 @@
                 .ncc-modal-head { display:flex; align-items:center; gap:8px; padding:12px; border-bottom:1px solid #29475e; background:#12283a; }
                 .ncc-modal-head h2 { flex:1; margin:0; color:#e3f8f2; font-size:13px; }
                 .ncc-modal-body { padding:12px; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-tabs { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); overflow:visible; padding:7px; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-tab { min-width:0; padding:6px 3px; white-space:normal; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-section-head { flex-wrap:wrap; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-section-head > * { min-width:0; max-width:100%; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-grid, #${ROOT_ID}[data-compact-layout="true"] .ncc-grid.ncc-grid-2, #${ROOT_ID}[data-compact-layout="true"] .ncc-grid.ncc-grid-3 { grid-template-columns:repeat(auto-fit,minmax(min(150px,100%),1fr)); }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-summary-strip { grid-template-columns:repeat(auto-fit,minmax(min(120px,100%),1fr)); overflow:visible; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-summary-strip > div { min-width:0; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-toolbar { max-width:100%; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-toolbar > .ncc-button, #${ROOT_ID}[data-compact-layout="true"] .ncc-toolbar > button { min-width:0; flex:1 1 calc(50% - 4px); overflow-wrap:anywhere; white-space:normal; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-toolbar > .ncc-input, #${ROOT_ID}[data-compact-layout="true"] .ncc-toolbar > label { min-width:0; max-width:100%; flex:1 1 100%; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-wrap { overflow:visible; border:0; border-radius:0; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table, #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table thead, #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table tbody { display:block; width:100%; white-space:normal; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table thead tr { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:8px; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table th { position:static; min-width:0; flex:1 1 92px; padding:6px; border:1px solid #35556c; border-radius:6px; background:#142b3e; line-height:1.2; white-space:normal; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table tbody tr { display:block; margin:0 0 8px; padding:7px 9px; border:1px solid #29465d; border-radius:8px; background:#0b1927; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table tbody tr:last-child { margin-bottom:0; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table td { display:grid; grid-template-columns:minmax(102px,.9fr) minmax(0,1.1fr); gap:8px; min-width:0; padding:5px 0; border-bottom:1px solid #1c354a; overflow-wrap:anywhere; text-align:right; white-space:normal; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table td::before { align-self:start; color:#8ca4b7; content:attr(data-label); font-size:9px; font-weight:700; letter-spacing:.04em; text-align:left; text-transform:uppercase; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table td:last-child { border-bottom:0; }
                 #${ROOT_ID}[data-runtime="mobile"] #ncc-panel { inset:max(4px, env(safe-area-inset-top)) 4px max(4px, env(safe-area-inset-bottom)) 4px !important; width:auto !important; height:auto !important; min-width:0; min-height:0; border-radius:11px; resize:none; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-resize-grip { display:none; }
                 #${ROOT_ID}[data-runtime="mobile"] #ncc-launcher { top:max(10px, env(safe-area-inset-top)); right:10px; }
@@ -1705,7 +1772,7 @@
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-table { white-space:normal; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-table th, #${ROOT_ID}[data-runtime="mobile"] .ncc-table td { padding:8px 6px; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-input[type="search"] { min-width:130px; flex:1; }
-                #${ROOT_ID}[data-runtime="mobile"] .ncc-summary-strip { grid-template-columns:repeat(2,minmax(120px,1fr)); }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-summary-strip { grid-template-columns:repeat(auto-fit,minmax(min(120px,100%),1fr)); }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-team-grid { grid-template-columns:1fr; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-team-card { min-height:96px; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-team-select { width:60%; }
@@ -1822,6 +1889,10 @@
         return `<th data-sort="${group}:${key}">${escapeHtml(label)}${marker}</th>`;
     }
 
+    function stackCell(label, value, className = "") {
+        return `<td data-label="${escapeHtml(label)}"${className ? ` class="${className}"` : ""}>${value}</td>`;
+    }
+
     function renderTeam() {
         const positions = projectionPositions();
         const mode = currentRuntimeMode();
@@ -1857,7 +1928,7 @@
         const assignments = calculateAssignmentPreview(rows, settings);
         const orderedPositions = orderedPriorityPositions(positions, settings.priority);
         const maxQty = Math.max(1, Math.floor(asNumber(state.data?.profile?.employees?.capacity, rows.length || 1)));
-        const capacityRows = positions.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Position</th><th>Max qty</th><th>Priority</th><th>Occupied</th></tr></thead><tbody>${orderedPositions.map((position, index) => `<tr><td><b>${escapeHtml(position)}</b></td><td><select class="ncc-select" data-capacity="${escapeHtml(position)}"><option value="0" ${asNumber(settings.capacities[position]) === 0 ? "selected" : ""}>Uncapped</option>${Array.from({ length: maxQty }, (_, quantity) => quantity + 1).map((quantity) => `<option value="${quantity}" ${asNumber(settings.capacities[position]) === quantity ? "selected" : ""}>${quantity}</option>`).join("")}</select></td><td><span class="ncc-priority-control"><button class="ncc-icon" data-action="priority-up" data-position="${escapeHtml(position)}" title="Move ${escapeHtml(position)} up" ${index === 0 ? "disabled" : ""}>↑</button><b>${index + 1}</b><button class="ncc-icon" data-action="priority-down" data-position="${escapeHtml(position)}" title="Move ${escapeHtml(position)} down" ${index === orderedPositions.length - 1 ? "disabled" : ""}>↓</button></span></td><td>${formatNumber(assignments.occupied[position] || 0)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice warn">Load per-employee TornStats projections first. Position names are intentionally discovered from the matching company-type response rather than hard-coded.</div>`;
+        const capacityRows = positions.length ? `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr><th>Position</th><th>Max qty</th><th>Priority</th><th>Occupied</th></tr></thead><tbody>${orderedPositions.map((position, index) => `<tr>${stackCell("Position", `<b>${escapeHtml(position)}</b>`)}${stackCell("Max qty", `<select class="ncc-select" data-capacity="${escapeHtml(position)}"><option value="0" ${asNumber(settings.capacities[position]) === 0 ? "selected" : ""}>Uncapped</option>${Array.from({ length: maxQty }, (_, quantity) => quantity + 1).map((quantity) => `<option value="${quantity}" ${asNumber(settings.capacities[position]) === quantity ? "selected" : ""}>${quantity}</option>`).join("")}</select>`)}${stackCell("Priority", `<span class="ncc-priority-control"><button class="ncc-icon" data-action="priority-up" data-position="${escapeHtml(position)}" title="Move ${escapeHtml(position)} up" ${index === 0 ? "disabled" : ""}>↑</button><b>${index + 1}</b><button class="ncc-icon" data-action="priority-down" data-position="${escapeHtml(position)}" title="Move ${escapeHtml(position)} down" ${index === orderedPositions.length - 1 ? "disabled" : ""}>↓</button></span>`)}${stackCell("Occupied", formatNumber(assignments.occupied[position] || 0))}</tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice warn">Load per-employee TornStats projections first. Position names are intentionally discovered from the matching company-type response rather than hard-coded.</div>`;
         const previewRows = sortRows(rows.map((row) => {
             const hasSavedAssignment = Object.prototype.hasOwnProperty.call(settings.assignments || {}, row.id);
             const assigned = hasSavedAssignment ? settings.assignments[row.id] : row.currentPosition;
@@ -1866,7 +1937,7 @@
             const change = projected === null || row.currentEfficiency === null ? null : projected - row.currentEfficiency;
             return { ...row, previewAssigned: assigned, previewEfficiency: projected, previewChange: change };
         }), { key: (row) => ({ name: row.name, current: row.currentPosition, assigned: row.previewAssigned, currentEfficiency: row.currentEfficiency, assignedEfficiency: row.previewEfficiency, change: row.previewChange, lock: row.locked ? 1 : 0 }[state.sort.planner.key]), dir: state.sort.planner.dir });
-        const rowsTable = previewRows.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr>${sortHeader("Employee", "name", "planner")}${sortHeader("Current", "current", "planner")}${sortHeader("Assigned", "assigned", "planner")}${sortHeader("Current eff.", "currentEfficiency", "planner")}${sortHeader("Assigned eff.", "assignedEfficiency", "planner")}${sortHeader("Change", "change", "planner")}${sortHeader("Lock", "lock", "planner")}</tr></thead><tbody>${previewRows.map((row) => `<tr class="${row.previewAssigned !== row.currentPosition ? "ncc-misplaced" : ""}"><td><b>${escapeHtml(row.name)}</b></td><td>${escapeHtml(row.currentPosition || "—")}</td><td>${escapeHtml(row.previewAssigned || "Unassigned")}</td><td>${formatOptionalNumber(row.currentEfficiency, 1)}</td><td class="${row.previewChange !== null && row.previewChange > 0 ? "ncc-good" : row.previewChange !== null && row.previewChange < 0 ? "ncc-bad" : ""}">${formatOptionalNumber(row.previewEfficiency, 1)}</td><td>${formatSignedNumber(row.previewChange)}</td><td>${row.locked ? "Locked" : "Flexible"}</td></tr>`).join("")}</tbody></table></div>` : "";
+        const rowsTable = previewRows.length ? `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr>${sortHeader("Employee", "name", "planner")}${sortHeader("Current", "current", "planner")}${sortHeader("Assigned", "assigned", "planner")}${sortHeader("Current eff.", "currentEfficiency", "planner")}${sortHeader("Assigned eff.", "assignedEfficiency", "planner")}${sortHeader("Change", "change", "planner")}${sortHeader("Lock", "lock", "planner")}</tr></thead><tbody>${previewRows.map((row) => `<tr class="${row.previewAssigned !== row.currentPosition ? "ncc-misplaced" : ""}">${stackCell("Employee", `<b>${escapeHtml(row.name)}</b>`)}${stackCell("Current", escapeHtml(row.currentPosition || "—"))}${stackCell("Assigned", escapeHtml(row.previewAssigned || "Unassigned"))}${stackCell("Current eff.", formatOptionalNumber(row.currentEfficiency, 1))}${stackCell("Assigned eff.", formatOptionalNumber(row.previewEfficiency, 1), row.previewChange !== null && row.previewChange > 0 ? "ncc-good" : row.previewChange !== null && row.previewChange < 0 ? "ncc-bad" : "")}${stackCell("Change", formatSignedNumber(row.previewChange))}${stackCell("Lock", row.locked ? "Locked" : "Flexible")}</tr>`).join("")}</tbody></table></div>` : "";
         const warnings = assignments.lockedOverages.map(([position, used]) => `${formatNumber(used)} locked employees exceed ${escapeHtml(position)}’s maximum.`).join(" ");
         return `${dataNotice()}<div class="ncc-toolbar"><button class="ncc-button" data-action="save-planner" ${positions.length ? "" : "disabled"}>Save max quantities</button><button class="ncc-button ncc-primary" data-action="auto-assign" ${positions.length ? "" : "disabled"}>Auto-assign unlocked staff</button><button class="ncc-button" data-action="load-projections" title="Refreshes TornStats role-efficiency choices for every employee after consent" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating…" : "Refresh TornStats role projections"}</button><span class="ncc-help">Priority is saved immediately. The top role fills first; choose Uncapped or 1–${formatNumber(maxQty)} for Max Qty.</span></div>${section("Position capacity & priority", capacityRows)}${warnings ? `<div class="ncc-notice warn">${warnings}</div>` : ""}${section("Assignment preview", rowsTable)}<p class="ncc-note">Auto assignment keeps locked employees in their current seats, then greedily fills positions by priority with the highest remaining base efficiency while respecting configured role caps and total company capacity. It only saves a local plan.</p>`;
     }
@@ -1921,7 +1992,7 @@
         const slotSource = state.starCohorts?.[id]?.source === "post-reset" ? "Sunday post-reset slot snapshot" : "first observed this Torn week";
         const rankContext = companyRankSummary(metrics, profile).map((field) => `<div><b>${formatNumber(field.rank)} / ${formatNumber(field.total)}</b><small>${escapeHtml(field.label)}</small></div>`).join("");
         const strip = `<div class="ncc-summary-strip">${rankContext}<div><b>${formatMoney(incomeOf(profile))}</b><small>Weekly income</small></div><div><b class="${metrics.nextGap === 0 ? "ncc-good" : "ncc-warn"}">${formatMoney(metrics.nextGap)}</b><small>Gap to ${metrics.nextStar || "next"}★</small></div><div><b class="ncc-good">${formatMoney(metrics.previousBuffer)}</b><small>Buffer to ${metrics.previousStar || "previous"}★</small></div><div><b>${formatPercent(metrics.percentile, 1)}</b><small>Health score / income rank</small></div><div><b class="${change.startsWith("▲") ? "ncc-good" : change.startsWith("▼") ? "ncc-bad" : ""}">${escapeHtml(change.split(" ")[0])}</b><small>${escapeHtml(change)}</small></div></div>`;
-        const table = `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr>${sortHeader("Rank", "rank", "rankings")}${sortHeader("Company", "name", "rankings")}${sortHeader("Rating", "rating", "rankings")}${sortHeader("Daily income", "daily", "rankings")}${sortHeader("Weekly income", "weekly", "rankings")}</tr></thead><tbody>${shown.map((row) => `<tr class="${row.own ? "ncc-own-row" : ""}"><td>${formatNumber(row.rank)}</td><td><b>${escapeHtml(row.name || "Unknown")}</b>${row.own ? " <span class=\"ncc-pill good\">Your company</span>" : ""}</td><td>${formatNumber(row.rating)}★</td><td>${formatMoney(row.daily, true)}</td><td>${formatMoney(row.weekly, true)}</td></tr>`).join("")}</tbody></table></div>`;
+        const table = `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr>${sortHeader("Rank", "rank", "rankings")}${sortHeader("Company", "name", "rankings")}${sortHeader("Rating", "rating", "rankings")}${sortHeader("Daily income", "daily", "rankings")}${sortHeader("Weekly income", "weekly", "rankings")}</tr></thead><tbody>${shown.map((row) => `<tr class="${row.own ? "ncc-own-row" : ""}">${stackCell("Rank", formatNumber(row.rank))}${stackCell("Company", `<b>${escapeHtml(row.name || "Unknown")}</b>${row.own ? " <span class=\"ncc-pill good\">Your company</span>" : ""}`)}${stackCell("Rating", `${formatNumber(row.rating)}★`)}${stackCell("Daily income", formatMoney(row.daily, true))}${stackCell("Weekly income", formatMoney(row.weekly, true))}</tr>`).join("")}</tbody></table></div>`;
         return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-rankings-filter" type="search" value="${escapeHtml(state.rankingsFilter)}" placeholder="Filter company or rank"><button class="ncc-button ncc-primary" data-action="load-rankings" title="Reloads all same-type Torn companies, then recalculates rank and star gaps" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading same-type rankings…" : "Refresh all same-type rankings"}</button><button class="ncc-button" data-action="show-health">View rank neighbors</button><span class="ncc-help">Updated ${timeAgo(record.fetchedAt)} · ${formatNumber(metrics.total)} companies</span></div>${section("Your company", `${strip}<p class="ncc-note">Health score is your weekly-income percentile among the same company type. Star slots use a ${slotSource}; the income gaps are observed planning values, not official Torn thresholds.</p>`)}${section("Same-type companies", `${table}${rows.length > shown.length ? `<p class="ncc-note">Showing the first ${formatNumber(shown.length)} filtered companies.</p>` : ""}`)}`;
     }
 
@@ -1967,10 +2038,10 @@
         let rows = Array.isArray(state.data?.stock) ? [...state.data.stock] : [];
         const sort = state.sort.stock;
         rows = sortRows(rows, { key: (item) => sort.key === "margin" ? asNumber(item.sold_worth) - asNumber(item.cost) * asNumber(item.sold_amount) : sort.key === "difference" ? stockDifference(item, previous) : sort.key === "current_worth" ? currentStockWorth(item) : item[sort.key], dir: sort.dir });
-        const table = rows.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr>${sortHeader("Item", "name", "stock")}${sortHeader("In stock", "in_stock", "stock")}${sortHeader("Current stock worth", "current_worth", "stock")}${sortHeader("Stock difference", "difference", "stock")}${sortHeader("On order", "on_order", "stock")}${sortHeader("Cost", "cost", "stock")}${sortHeader("Price", "price", "stock")}${sortHeader("Sold", "sold_amount", "stock")}${sortHeader("Sold worth", "sold_worth", "stock")}${sortHeader("Gross margin", "margin", "stock")}</tr></thead><tbody>${rows.map((item) => {
+        const table = rows.length ? `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr>${sortHeader("Item", "name", "stock")}${sortHeader("In stock", "in_stock", "stock")}${sortHeader("Current stock worth", "current_worth", "stock")}${sortHeader("Stock difference", "difference", "stock")}${sortHeader("On order", "on_order", "stock")}${sortHeader("Cost", "cost", "stock")}${sortHeader("Price", "price", "stock")}${sortHeader("Sold", "sold_amount", "stock")}${sortHeader("Sold worth", "sold_worth", "stock")}${sortHeader("Gross margin", "margin", "stock")}</tr></thead><tbody>${rows.map((item) => {
             const margin = asNumber(item.sold_worth) - asNumber(item.cost) * asNumber(item.sold_amount);
             const difference = stockDifference(item, previous);
-            return `<tr><td><b>${escapeHtml(item.name || "Unknown")}</b><br><span class="ncc-muted">ID ${formatNumber(item.id)}</span></td><td>${formatNumber(item.in_stock)}</td><td class="ncc-good">${formatMoney(currentStockWorth(item))}</td><td class="${difference === null ? "ncc-muted" : difference > 0 ? "ncc-good" : difference < 0 ? "ncc-bad" : ""}">${difference === null ? "—" : formatSignedNumber(difference)}</td><td>${formatNumber(item.on_order)}</td><td>${formatMoney(item.cost)}</td><td>${formatMoney(item.price)}</td><td>${formatNumber(item.sold_amount)}</td><td>${formatMoney(item.sold_worth)}</td><td class="${margin >= 0 ? "ncc-good" : "ncc-bad"}">${formatMoney(margin)}</td></tr>`;
+            return `<tr>${stackCell("Item", `<b>${escapeHtml(item.name || "Unknown")}</b><br><span class="ncc-muted">ID ${formatNumber(item.id)}</span>`)}${stackCell("In stock", formatNumber(item.in_stock))}${stackCell("Current stock worth", formatMoney(currentStockWorth(item)), "ncc-good")}${stackCell("Stock difference", difference === null ? "—" : formatSignedNumber(difference), difference === null ? "ncc-muted" : difference > 0 ? "ncc-good" : difference < 0 ? "ncc-bad" : "")}${stackCell("On order", formatNumber(item.on_order))}${stackCell("Cost", formatMoney(item.cost))}${stackCell("Price", formatMoney(item.price))}${stackCell("Sold", formatNumber(item.sold_amount))}${stackCell("Sold worth", formatMoney(item.sold_worth))}${stackCell("Gross margin", formatMoney(margin), margin >= 0 ? "ncc-good" : "ncc-bad")}</tr>`;
         }).join("")}</tbody></table></div>` : `<div class="ncc-notice warn">Stock details require a Limited or higher Torn API key.</div>`;
         return `${dataNotice()}<div class="ncc-grid ncc-grid-3">${metricCard("Stock items", formatNumber(totals.inStock), `${formatNumber(totals.onOrder)} on order`)}${metricCard("Stock value", formatMoney(totals.saleValue), `${formatMoney(totals.costValue)} at cost`, "ncc-good")}${metricCard("Reported gross margin", formatMoney(totals.margin), `${formatMoney(totals.soldWorth)} sold worth`, totals.margin >= 0 ? "ncc-good" : "ncc-bad")}</div>${section("Stock & sales", table)}<p class="ncc-note">Stock difference is today’s in-stock amount minus the last local Torn reporting-day snapshot. It appears after a prior daily snapshot exists. Reported gross margin = sold worth − (cost × sold amount).</p>`;
     }
@@ -2150,7 +2221,7 @@
             const item = trendChartDefinition(type);
             return `<option value="${item.id}" ${item.id === chart.id ? "selected" : ""}>${escapeHtml(item.label)}</option>`;
         }).join("");
-        const table = latest.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Reporting day</th><th>Daily income</th><th>Daily Profit</th><th>Weekly income</th><th>Weekly Profit</th><th>Rating</th><th>Funds</th></tr></thead><tbody>${latest.map((row) => `<tr><td>${escapeHtml(formatDateTime(row.period))}</td><td class="ncc-good">${trendNumber(row.dailyIncome) === null ? "—" : formatMoney(row.dailyIncome)}</td><td class="${trendNumber(row.dailyProfit) === null ? "ncc-muted" : row.dailyProfit >= 0 ? "ncc-good" : "ncc-bad"}">${trendNumber(row.dailyProfit) === null ? "—" : formatMoney(row.dailyProfit)}</td><td>${trendNumber(row.weeklyIncome) === null ? "—" : formatMoney(row.weeklyIncome)}</td><td>${trendNumber(row.weeklyProfit) === null ? "—" : formatMoney(row.weeklyProfit)}</td><td>${trendNumber(row.rating) === null ? "—" : `${formatNumber(row.rating)}★`}</td><td>${trendNumber(row.funds) === null ? "—" : formatMoney(row.funds)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice">The companion keeps one local snapshot per Torn reporting day (18:10 UTC). Refresh after installing to begin history.</div>`;
+        const table = latest.length ? `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr><th>Reporting day</th><th>Daily income</th><th>Daily Profit</th><th>Weekly income</th><th>Weekly Profit</th><th>Rating</th><th>Funds</th></tr></thead><tbody>${latest.map((row) => `<tr>${stackCell("Reporting day", escapeHtml(formatDateTime(row.period)))}${stackCell("Daily income", trendNumber(row.dailyIncome) === null ? "—" : formatMoney(row.dailyIncome), "ncc-good")}${stackCell("Daily Profit", trendNumber(row.dailyProfit) === null ? "—" : formatMoney(row.dailyProfit), trendNumber(row.dailyProfit) === null ? "ncc-muted" : row.dailyProfit >= 0 ? "ncc-good" : "ncc-bad")}${stackCell("Weekly income", trendNumber(row.weeklyIncome) === null ? "—" : formatMoney(row.weeklyIncome))}${stackCell("Weekly Profit", trendNumber(row.weeklyProfit) === null ? "—" : formatMoney(row.weeklyProfit))}${stackCell("Rating", trendNumber(row.rating) === null ? "—" : `${formatNumber(row.rating)}★`)}${stackCell("Funds", trendNumber(row.funds) === null ? "—" : formatMoney(row.funds))}</tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice">The companion keeps one local snapshot per Torn reporting day (18:10 UTC). Refresh after installing to begin history.</div>`;
         return `${dataNotice()}<div class="ncc-toolbar"><label class="ncc-inline"><span class="ncc-label">Chart view</span><select id="ncc-trend-chart" class="ncc-select" title="Choose the local daily metric to chart">${chartOptions}</select></label><button class="ncc-button" data-action="export-history" ${history.length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="reset-history" ${history.length ? "" : "disabled"}>Clear local history</button><span class="ncc-help">${formatNumber(history.length)} retained daily snapshots · 92-day retention</span></div>${section(`${chart.label} trend`, trendSvg(history, chart.id))}${section("Local company history", table)}<p class="ncc-note">History stays in your userscript storage and is never uploaded by this companion. Income comes from daily Torn snapshots; Profit is calculated locally from the available daily inputs. Stock worth is recorded only when stock details are available; average employee effectiveness is the displayed current-effectiveness average; company rank is recorded only after same-type rankings load. Older snapshots can lack these newer metrics and remain unavailable rather than being inferred.</p>`;
     }
 
@@ -2162,8 +2233,8 @@
     function renderHealthModal() {
         const metrics = rankingMetrics();
         if (!metrics) return "";
-        const rows = metrics.neighbors.map((company) => `<tr class="${company.rank === metrics.rank ? "ncc-own-row" : ""}"><td>${formatNumber(company.rank)}</td><td><b>${escapeHtml(company.name || "Unknown")}</b></td><td>${formatNumber(company.rating)}★</td><td>${formatMoney(incomeOf(company, "daily"), true)}</td><td>${formatMoney(incomeOf(company), true)}</td></tr>`).join("");
-        return `<div class="ncc-modal-backdrop" data-action="close-modal"><section class="ncc-modal" role="dialog" aria-modal="true" aria-label="Health score neighbors"><header class="ncc-modal-head"><h2>Health score · income rank</h2><button class="ncc-icon" data-action="close-modal">×</button></header><div class="ncc-modal-body"><div class="ncc-grid ncc-grid-3">${metricCard("Health score", formatPercent(metrics.percentile, 1), "Weekly-income percentile", "ncc-good")}${metricCard("Your rank", `${formatNumber(metrics.rank)} / ${formatNumber(metrics.total)}`, "Same company type")}${metricCard("Weekly income", formatMoney(incomeOf(state.data?.profile)), "Current Torn value")}</div><p class="ncc-note">Health score is not a Torn API field or a hidden company-quality formula. It is the companion’s transparent weekly-income percentile: (companies − rank + 1) / companies.</p><div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Rank</th><th>Company</th><th>Rating</th><th>Daily income</th><th>Weekly income</th></tr></thead><tbody>${rows}</tbody></table></div></div></section></div>`;
+        const rows = metrics.neighbors.map((company) => `<tr class="${company.rank === metrics.rank ? "ncc-own-row" : ""}">${stackCell("Rank", formatNumber(company.rank))}${stackCell("Company", `<b>${escapeHtml(company.name || "Unknown")}</b>`)}${stackCell("Rating", `${formatNumber(company.rating)}★`)}${stackCell("Daily income", formatMoney(incomeOf(company, "daily"), true))}${stackCell("Weekly income", formatMoney(incomeOf(company), true))}</tr>`).join("");
+        return `<div class="ncc-modal-backdrop" data-action="close-modal"><section class="ncc-modal" role="dialog" aria-modal="true" aria-label="Health score neighbors"><header class="ncc-modal-head"><h2>Health score · income rank</h2><button class="ncc-icon" data-action="close-modal">×</button></header><div class="ncc-modal-body"><div class="ncc-grid ncc-grid-3">${metricCard("Health score", formatPercent(metrics.percentile, 1), "Weekly-income percentile", "ncc-good")}${metricCard("Your rank", `${formatNumber(metrics.rank)} / ${formatNumber(metrics.total)}`, "Same company type")}${metricCard("Weekly income", formatMoney(incomeOf(state.data?.profile)), "Current Torn value")}</div><p class="ncc-note">Health score is not a Torn API field or a hidden company-quality formula. It is the companion’s transparent weekly-income percentile: (companies − rank + 1) / companies.</p><div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr><th>Rank</th><th>Company</th><th>Rating</th><th>Daily income</th><th>Weekly income</th></tr></thead><tbody>${rows}</tbody></table></div></div></section></div>`;
     }
 
     function renderMain() {
@@ -2417,8 +2488,9 @@
         handle.addEventListener("pointermove", (event) => {
             if (!drag) return;
             const rect = el.getBoundingClientRect();
-            state.layout.x = clamp(Math.round(event.clientX - drag.dx), 0, Math.max(0, window.innerWidth - rect.width));
-            state.layout.y = clamp(Math.round(event.clientY - drag.dy), 0, Math.max(0, window.innerHeight - 60));
+            const viewport = visibleViewport();
+            state.layout.x = clamp(Math.round(event.clientX - drag.dx), 0, Math.max(0, viewport.width - rect.width));
+            state.layout.y = clamp(Math.round(event.clientY - drag.dy), 0, Math.max(0, viewport.height - 60));
             applyLayout();
         });
         const endDrag = async () => {
@@ -2443,13 +2515,16 @@
             });
             grip.addEventListener("pointermove", (event) => {
                 if (!resize) return;
-                const maxHeight = Math.max(420, window.innerHeight - resize.top);
-                const height = clamp(Math.round(resize.height + event.clientY - resize.y), 420, maxHeight);
+                const viewport = visibleViewport();
+                const maxHeight = Math.max(1, viewport.height - resize.top - PANEL_MARGIN);
+                const height = clamp(Math.round(resize.height + event.clientY - resize.y), Math.min(420, maxHeight), maxHeight);
                 if (resize.edge === "left") {
-                    const width = clamp(Math.round(resize.width - (event.clientX - resize.x)), 430, Math.max(430, resize.right));
+                    const maxWidth = Math.max(1, resize.right - PANEL_MARGIN);
+                    const width = clamp(Math.round(resize.width - (event.clientX - resize.x)), Math.min(430, maxWidth), maxWidth);
                     state.layout = { ...state.layout, x: Math.round(resize.right - width), y: Math.round(resize.top), width, height };
                 } else {
-                    const width = clamp(Math.round(resize.width + event.clientX - resize.x), 430, Math.max(430, window.innerWidth - resize.left));
+                    const maxWidth = Math.max(1, viewport.width - resize.left - PANEL_MARGIN);
+                    const width = clamp(Math.round(resize.width + event.clientX - resize.x), Math.min(430, maxWidth), maxWidth);
                     state.layout = { ...state.layout, x: Math.round(resize.left), y: Math.round(resize.top), width, height };
                 }
                 applyLayout();
@@ -2513,7 +2588,7 @@
         });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, safeRequestDescriptor, safeDiagnosticError };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, safeRequestDescriptor, safeDiagnosticError };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
     if (typeof document !== "undefined" && typeof window !== "undefined") {
