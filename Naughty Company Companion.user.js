@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.1.6
+// @version      1.1.7
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/companies.php*
@@ -23,7 +23,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.1.6";
+    const VERSION = "1.1.7";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -1571,7 +1571,8 @@
         root.id = ROOT_ID;
         root.innerHTML = `
             <style>
-                #${ROOT_ID}, #${ROOT_ID} * { box-sizing: border-box; }
+                #${ROOT_ID}, #${ROOT_ID} * { box-sizing: border-box; -ms-overflow-style:none; scrollbar-width:none; }
+                #${ROOT_ID}::-webkit-scrollbar, #${ROOT_ID} *::-webkit-scrollbar { width:0; height:0; display:none; }
                 #${ROOT_ID} { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
                 #ncc-alert-toasts { position:fixed; z-index:2147483647; top:max(12px, env(safe-area-inset-top)); right:max(12px, env(safe-area-inset-right)); display:grid; gap:8px; width:min(460px,calc(100vw - 24px)); pointer-events:none; }
                 .ncc-alert-toast { max-height:min(48vh,360px); overflow:auto; padding:11px 13px; border:1px solid #397866; border-radius:10px; background:#123e37; box-shadow:0 14px 36px #000a; color:#ecfff7; font-size:12px; font-weight:650; line-height:1.4; white-space:pre-wrap; pointer-events:auto; cursor:pointer; }
@@ -1593,12 +1594,11 @@
                 .ncc-icon { width:29px; height:29px; border:1px solid #39546b; border-radius:8px; background:#132337; color:#bcd0df; cursor:pointer; font-size:14px; }
                 .ncc-refresh-button { min-height:29px; padding:5px 8px; }
                 .ncc-icon:hover, .ncc-tab.active, .ncc-primary:hover { border-color:#4ce0bd; color:#e5fff8; }
-                .ncc-tabs { display:flex; gap:5px; overflow:auto; padding:8px 10px; border-bottom:1px solid #253d52; background:#0d1a28; scrollbar-width:thin; }
+                .ncc-tabs { display:flex; gap:5px; overflow-x:auto; overflow-y:hidden; padding:8px 10px; border-bottom:1px solid #253d52; background:#0d1a28; }
                 .ncc-tab { flex:0 0 auto; min-height:30px; padding:6px 10px; border:1px solid transparent; border-radius:7px; background:transparent; color:#8fa6b9; cursor:pointer; font-size:11px; font-weight:700; }
                 .ncc-tab:hover { color:#e0eef7; background:#14283a; }
                 .ncc-tab.active { background:#163a48; color:#dffcf4; }
-                #ncc-content { min-height:0; flex:1; overflow:auto; padding:12px; -ms-overflow-style:none; scrollbar-width:none; }
-                #ncc-content::-webkit-scrollbar, .ncc-modal::-webkit-scrollbar { display:none; }
+                #ncc-content { min-height:0; flex:1; overflow:auto; padding:12px; }
                 .ncc-section { margin-bottom:12px; border:1px solid #29465d; border-radius:11px; background:#0d1b2a; overflow:hidden; }
                 .ncc-section-head { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:10px 11px; border-bottom:1px solid #243e54; background:#112235; }
                 .ncc-section-head h2, .ncc-section-head h3 { margin:0; color:#e4f3fa; font-size:12px; letter-spacing:.01em; }
@@ -1629,7 +1629,7 @@
                 .ncc-input[type="search"] { min-width:170px; }
                 .ncc-check { display:flex; align-items:flex-start; gap:8px; color:#afc1ce; font-size:11px; line-height:1.35; }
                 .ncc-check input { margin:2px 0 0; accent-color:#48dcb9; }
-                .ncc-table-wrap { overflow:auto; border:1px solid #29465d; border-radius:8px; }
+                .ncc-table-wrap { overflow-x:auto; overflow-y:hidden; border:1px solid #29465d; border-radius:8px; }
                 .ncc-table { width:100%; border-collapse:collapse; font-size:10.5px; white-space:nowrap; }
                 .ncc-team-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:7px; }
                 .ncc-team-list { display:flex; flex-direction:column; gap:8px; }
@@ -1678,7 +1678,7 @@
                 .ncc-inline { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
                 .ncc-right { margin-left:auto; }
                 .ncc-help { color:#7f98a9; font-size:10px; line-height:1.45; }
-                .ncc-summary-strip { display:grid; grid-template-columns:repeat(6,minmax(120px,1fr)); overflow:auto; border:1px solid #2c5861; border-radius:9px; background:#103538; }
+                .ncc-summary-strip { display:grid; grid-template-columns:repeat(6,minmax(120px,1fr)); overflow-x:auto; overflow-y:hidden; border:1px solid #2c5861; border-radius:9px; background:#103538; }
                 .ncc-summary-strip > div { min-width:120px; padding:9px; border-right:1px solid #286064; }
                 .ncc-summary-strip > div:last-child { border-right:0; }
                 .ncc-summary-strip b { display:block; color:#e2fff7; font-size:14px; }
@@ -1690,7 +1690,7 @@
                 .ncc-trend-detail { margin-top:10px; }
                 .ncc-trend-detail .ncc-kv { min-width:0; }
                 .ncc-modal-backdrop { position:fixed; z-index:2147483647; inset:0; display:grid; place-items:center; padding:16px; background:#000a; }
-                .ncc-modal { width:min(720px,100%); max-height:min(700px,calc(100vh - 32px)); overflow:auto; -ms-overflow-style:none; scrollbar-width:none; border:1px solid #46718a; border-radius:14px; background:#0c1a29; box-shadow:0 24px 72px #000c; }
+                .ncc-modal { width:min(720px,100%); max-height:min(700px,calc(100vh - 32px)); overflow:auto; border:1px solid #46718a; border-radius:14px; background:#0c1a29; box-shadow:0 24px 72px #000c; }
                 .ncc-modal-head { display:flex; align-items:center; gap:8px; padding:12px; border-bottom:1px solid #29475e; background:#12283a; }
                 .ncc-modal-head h2 { flex:1; margin:0; color:#e3f8f2; font-size:13px; }
                 .ncc-modal-body { padding:12px; }

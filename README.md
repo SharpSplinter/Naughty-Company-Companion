@@ -89,6 +89,10 @@ Confirmed TornPDA installs also keep one generic native background reminder for 
 
 The browser/TornPDA console shows `[Naughty Company Companion]` startup/runtime, storage, and API transport diagnostics by default. Request logs contain only method, host, path, status, transport, and duration. Query strings, headers, Torn API keys, and the TornStats key path segment are redacted; response bodies are never logged.
 
+## Scrolling
+
+The main panel owns vertical page flow, including the full Same-type companies ranking table. Table, tab, summary, toast, and modal scrollbars are visually hidden while mouse-wheel, keyboard, and TornPDA touch scrolling remain available; tables retain horizontal scrolling where needed.
+
 ## Updating and verification
 
 Reopen the raw userscript URL in your userscript manager to update.

@@ -1,6 +1,9 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const companion = require("./Naughty Company Companion.user.js");
+const source = fs.readFileSync(path.join(__dirname, "Naughty Company Companion.user.js"), "utf8");
 
 const company = (id, weekly, rating, daily = weekly / 7) => ({
     id,
@@ -272,4 +275,14 @@ test("console diagnostic descriptors never expose API query, header, or TornStat
     assert.match(message, /www\.tornstats\.com\/api\/v2\/\[redacted\]\/efficiency/);
     assert.doesNotMatch(message, /tornstats-secret|query-secret|header-secret|other-secret/);
     assert.doesNotMatch(barePathMessage, /tornstats-secret/);
+});
+
+test("rankings flow through the main panel while all Company scroll regions stay trackless", () => {
+    assert.match(source, /#\$\{ROOT_ID\}, #\$\{ROOT_ID\} \* \{ box-sizing: border-box; -ms-overflow-style:none; scrollbar-width:none; \}/);
+    assert.match(source, /#\$\{ROOT_ID\}::-webkit-scrollbar, #\$\{ROOT_ID\} \*::-webkit-scrollbar \{ width:0; height:0; display:none; \}/);
+    assert.match(source, /\.ncc-table-wrap \{ overflow-x:auto; overflow-y:hidden;/);
+    assert.match(source, /\.ncc-tabs \{ display:flex; gap:5px; overflow-x:auto; overflow-y:hidden;/);
+    assert.match(source, /\.ncc-summary-strip \{ display:grid; grid-template-columns:repeat\(6,minmax\(120px,1fr\)\); overflow-x:auto; overflow-y:hidden;/);
+    assert.doesNotMatch(source, /\.ncc-table-wrap\s*\{[^}]*max-height:/);
+    assert.doesNotMatch(source, /\.ncc-table-wrap\s*\{[^}]*overflow:auto/);
 });
