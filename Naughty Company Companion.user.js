@@ -4,7 +4,7 @@
 // @version      1.1.0
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
-// @match        https://www.torn.com/*
+// @match        https://www.torn.com/companies.php*
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
