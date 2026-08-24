@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.1.4
+// @version      1.1.5
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/companies.php*
@@ -23,7 +23,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.1.4";
+    const VERSION = "1.1.5";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -32,8 +32,20 @@
     const PROJECTION_TTL = 24 * 60 * 60 * 1000;
     const DAILY_TICK_HOUR_UTC = 18;
     const DAILY_ALERTS = Object.freeze({
-        income: { minute: 0, notificationId: 6811, title: "Naughty Company — Daily Tick" },
-        employeeRisk: { minute: 10, notificationId: 6812, title: "Naughty Company — Employee Effectiveness" }
+        income: {
+            minute: 0,
+            notificationId: 6811,
+            reminderNotificationId: 6813,
+            title: "Naughty Company — Daily Tick",
+            reminderText: "Company daily tick is due. Open Naughty Company Companion to refresh live Daily Income, Daily Profit, and Daily Customer Count."
+        },
+        employeeRisk: {
+            minute: 10,
+            notificationId: 6812,
+            reminderNotificationId: 6814,
+            title: "Naughty Company — Employee Effectiveness",
+            reminderText: "Employee effectiveness check is due. Open Naughty Company Companion to refresh and review Addiction and Inactivity penalties below -12."
+        }
     });
     const EFFECTIVENESS_ALERT_THRESHOLD = -12;
     const STORE = {
@@ -45,7 +57,8 @@
         rankHistory: "ncc:rank-history:v1",
         starCohorts: "ncc:star-cohorts:v1",
         layout: "ncc:layout:v1",
-        dailyAlerts: "ncc:daily-alerts:v1"
+        dailyAlerts: "ncc:daily-alerts:v1",
+        dailyReminders: "ncc:daily-reminders:v1"
     };
     const STORE_KEYS = Object.values(STORE);
     const LEGACY_FALLBACK_KEY = "ncc:pda-fallback-keys:v1";
@@ -73,6 +86,7 @@
         rankHistory: {},
         starCohorts: {},
         dailyAlerts: {},
+        dailyReminders: {},
         loading: false,
         rankingLoading: false,
         projectionLoading: false,
@@ -91,7 +105,9 @@
     };
     const dailyAlertRuntime = {
         timerId: null,
-        inFlight: new Set()
+        liveTimerId: null,
+        inFlight: new Set(),
+        reminderRefreshPromise: null
     };
     const storage = {
         cache: {},
@@ -391,6 +407,7 @@
                 nativeRuntime.isTornPDA = response?.isTornPDA === true;
                 nativeRuntime.confirmationComplete = true;
                 if (previous !== nativeRuntime.isTornPDA || tornPdaUserAgent(currentUserAgent())) refreshRuntimePresentation();
+                if (nativeRuntime.isTornPDA) void refreshDailyTickReminders({ force: true });
                 return nativeRuntime.isTornPDA;
             })
             .catch(() => {
@@ -546,14 +563,76 @@
         return showDesktopNotification(alert.title, text);
     }
 
+    function nextDailyReminderTimestamp(alert, timestamp = Date.now()) {
+        const today = dailyAlertPhaseTime(timestamp, alert.minute);
+        return today > timestamp + 1000 ? today : dailyAlertPhaseTime(timestamp + DAY, alert.minute);
+    }
+
+    function buildDailyTickReminder(kind, timestamp = Date.now()) {
+        const alert = DAILY_ALERTS[kind];
+        if (!alert) return null;
+        return {
+            title: alert.title,
+            subtitle: alert.reminderText,
+            id: alert.reminderNotificationId,
+            timestamp: nextDailyReminderTimestamp(alert, timestamp),
+            overwriteID: true,
+            launchNativeToast: false,
+            urlCallback: companyPageUrl()
+        };
+    }
+
+    async function persistDailyReminders() {
+        await storeSet(STORE.dailyReminders, state.dailyReminders);
+    }
+
+    async function scheduleDailyTickReminder(kind, { force = false } = {}) {
+        const reminder = buildDailyTickReminder(kind);
+        if (!reminder) return false;
+        if (!force && state.dailyReminders?.[kind]?.timestamp === reminder.timestamp) return true;
+        const response = await callConfirmedPdaHandler("scheduleNotification", reminder);
+        if (!pdaHandlerSucceeded(response)) return false;
+        state.dailyReminders = { ...state.dailyReminders, [kind]: { timestamp: reminder.timestamp, scheduledAt: Date.now() } };
+        await persistDailyReminders();
+        return true;
+    }
+
+    async function cancelDailyTickReminder(kind) {
+        const alert = DAILY_ALERTS[kind];
+        if (!alert) return false;
+        const response = await callConfirmedPdaHandler("cancelNotification", { id: alert.reminderNotificationId });
+        const reminders = { ...state.dailyReminders };
+        delete reminders[kind];
+        state.dailyReminders = reminders;
+        await persistDailyReminders();
+        return pdaHandlerSucceeded(response);
+    }
+
+    async function refreshDailyTickReminders({ force = false } = {}) {
+        if (dailyAlertRuntime.reminderRefreshPromise) return dailyAlertRuntime.reminderRefreshPromise;
+        dailyAlertRuntime.reminderRefreshPromise = (async () => {
+            if (!nativeRuntime.isTornPDA && !await confirmTornPDA()) return false;
+            const results = await Promise.all(Object.keys(DAILY_ALERTS).map((kind) => scheduleDailyTickReminder(kind, { force })));
+            return results.every(Boolean);
+        })();
+        try {
+            return await dailyAlertRuntime.reminderRefreshPromise;
+        } finally {
+            dailyAlertRuntime.reminderRefreshPromise = null;
+        }
+    }
+
     async function deliverDailyAlert(kind, payload) {
         const alert = DAILY_ALERTS[kind];
         if (!alert) return false;
+        const native = nativeRuntime.isTornPDA || await confirmTornPDA();
+        if (native) await cancelDailyTickReminder(kind);
         const tone = kind === "employeeRisk" && payload.risks?.length ? "bad" : payload.unavailable ? "warn" : "good";
         const results = await Promise.allSettled([
             showDailyToast(payload.text, tone),
             showDailyNotification(alert, payload.text)
         ]);
+        if (native) await refreshDailyTickReminders();
         return results.some((result) => result.status === "fulfilled" && result.value === true);
     }
 
@@ -856,6 +935,10 @@
         return [...today, ...nextDay].sort((left, right) => left - right).find((candidate) => candidate > timestamp + 250) || nextDay[0];
     }
 
+    function dailyAlertKindAt(timestamp) {
+        return Object.entries(DAILY_ALERTS).find(([, alert]) => dailyAlertPhaseTime(timestamp, alert.minute) === timestamp)?.[0] || null;
+    }
+
     function dailyAlertRefreshNeeded(kinds, timestamp = Date.now(), data = state.data) {
         if (!data?.profile) return true;
         return kinds.some((kind) => !dailyAlertDataSource(data, dailyAlertPhaseTime(timestamp, DAILY_ALERTS[kind].minute)).fresh);
@@ -896,15 +979,22 @@
 
     function scheduleDailyTickAlerts() {
         if (dailyAlertRuntime.timerId) clearTimeout(dailyAlertRuntime.timerId);
-        const delay = Math.max(1000, nextDailyAlertTimestamp() - Date.now() + 300);
+        if (dailyAlertRuntime.liveTimerId) clearTimeout(dailyAlertRuntime.liveTimerId);
+        const target = nextDailyAlertTimestamp();
+        const delay = Math.max(0, target - Date.now() - 1000);
         dailyAlertRuntime.timerId = setTimeout(async () => {
-            await runDailyTickAlerts({ refresh: true });
-            scheduleDailyTickAlerts();
+            const kind = dailyAlertKindAt(target);
+            if (kind && nativeRuntime.isTornPDA) await cancelDailyTickReminder(kind);
+            dailyAlertRuntime.liveTimerId = setTimeout(async () => {
+                await runDailyTickAlerts({ refresh: true });
+                scheduleDailyTickAlerts();
+            }, Math.max(0, target - Date.now() + 300));
         }, delay);
     }
 
     function resetDailyTickAlerts() {
         scheduleDailyTickAlerts();
+        void refreshDailyTickReminders();
         void runDailyTickAlerts({ refresh: true });
     }
 
@@ -1104,6 +1194,7 @@
         const rankHistory = stored[STORE.rankHistory] ?? {};
         const starCohorts = stored[STORE.starCohorts] ?? {};
         const dailyAlerts = stored[STORE.dailyAlerts] ?? {};
+        const dailyReminders = stored[STORE.dailyReminders] ?? {};
         state.settings = deepMergeSettings(settings);
         state.layout = { ...DEFAULT_LAYOUT, ...(isObject(layout) ? layout : {}) };
         state.cache = isObject(cache) ? cache : null;
@@ -1113,6 +1204,7 @@
         state.rankHistory = isObject(rankHistory) ? rankHistory : {};
         state.starCohorts = isObject(starCohorts) ? starCohorts : {};
         state.dailyAlerts = isObject(dailyAlerts) ? dailyAlerts : {};
+        state.dailyReminders = isObject(dailyReminders) ? dailyReminders : {};
         state.selectedTab = state.settings.activeTab || "overview";
         if (state.cache?.profile?.id) state.data = state.cache;
     }
@@ -2104,6 +2196,7 @@
 
     async function clearLocalData() {
         if (!window.confirm("Clear all Naughty Company Companion local data, including saved keys, history, ranking cache, plans, and projections?")) return;
+        if (nativeRuntime.isTornPDA || await confirmTornPDA()) await Promise.all(Object.keys(DAILY_ALERTS).map((kind) => cancelDailyTickReminder(kind)));
         await Promise.all(Object.values(STORE).map((key) => storeDelete(key)));
         state.settings = { ...DEFAULT_SETTINGS };
         state.layout = { ...DEFAULT_LAYOUT };
@@ -2115,6 +2208,7 @@
         state.rankHistory = {};
         state.starCohorts = {};
         state.dailyAlerts = {};
+        state.dailyReminders = {};
         state.selectedTab = "overview";
         state.error = "";
         state.status = "All companion data was cleared from local userscript storage.";
@@ -2302,7 +2396,7 @@
         });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
     if (typeof document !== "undefined" && typeof window !== "undefined") {

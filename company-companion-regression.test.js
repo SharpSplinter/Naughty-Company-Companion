@@ -236,3 +236,23 @@ test("employee effectiveness alert lists every addiction or inactivity penalty b
     assert.match(alert.text, /Inactive \(Inactivity -14\)/);
     assert.equal(alert.source.fresh, true);
 });
+
+test("native background reminders use the next tick phase and generic text only", () => {
+    const beforeTick = Date.UTC(2026, 7, 24, 17, 0, 0);
+    const incomeTick = Date.UTC(2026, 7, 24, 18, 0, 0);
+    const employeeTick = Date.UTC(2026, 7, 24, 18, 10, 0);
+    const tomorrowIncomeTick = Date.UTC(2026, 7, 25, 18, 0, 0);
+    const income = companion.buildDailyTickReminder("income", beforeTick);
+    const employee = companion.buildDailyTickReminder("employeeRisk", beforeTick);
+
+    assert.equal(income.timestamp, incomeTick);
+    assert.equal(employee.timestamp, employeeTick);
+    assert.equal(income.id, 6813);
+    assert.equal(employee.id, 6814);
+    assert.match(income.subtitle, /Open Naughty Company Companion to refresh live Daily Income/);
+    assert.doesNotMatch(income.subtitle, /Daily Income: \$/);
+    assert.equal(companion.dailyAlertKindAt(incomeTick), "income");
+    assert.equal(companion.dailyAlertKindAt(employeeTick), "employeeRisk");
+    assert.equal(companion.dailyAlertKindAt(beforeTick), null);
+    assert.equal(companion.nextDailyReminderTimestamp({ minute: 0 }, incomeTick), tomorrowIncomeTick);
+});
