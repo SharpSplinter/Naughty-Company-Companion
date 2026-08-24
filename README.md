@@ -25,7 +25,7 @@ Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn compa
 - Same-type company ranking loaded through Torn pagination and sorted locally by weekly income.
 - Health score defined transparently as weekly-income percentile among same company type.
 - Observed weekly-income gaps to the next and previous star bands; these are planning values, not an official Torn formula.
-- Stock, sales, gross margin, and a per-item daily **Stock difference** once a prior local reporting-day snapshot exists.
+- Stock, sales, gross margin, per-item **Current stock worth** (in-stock quantity × sale price), and a daily **Stock difference** once a prior local reporting-day snapshot exists.
 - Local daily history retained for 92 days, an axis-labeled interactive trend chart with selectable day points and daily details, and CSV export.
 - Your-company ranking context for both the current star level and the same company type.
 
@@ -34,6 +34,7 @@ Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn compa
 - Overview, Team, Planner, Rankings, Stock, Trends, and Settings tabs.
 - Explicit refresh labels explaining which data will be loaded.
 - Persistent panel position, size, selected tab, plans, capacities, priorities, and local history.
+- Explicit TornPDA/user-agent and effective viewport/scale detection. Team uses a detailed top-to-bottom list on desktop and compact cards on TornPDA or constrained mobile viewports.
 - Desktop drag/resize/minimize controls and a safe mobile TornPDA layout.
 
 ## Installation

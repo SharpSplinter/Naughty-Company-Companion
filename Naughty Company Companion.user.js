@@ -21,7 +21,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.1.0";
+    const VERSION = "1.1.1";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -71,6 +71,7 @@
         teamFilter: "",
         rankingsFilter: "",
         selectedTrendPeriod: null,
+        runtimeMode: "desktop",
         modal: null,
         autoRefreshId: null
     };
@@ -721,10 +722,33 @@
         return document.getElementById("ncc-content");
     }
 
+    function runtimeMode({ userAgent = "", width = 1024, height = 768, scale = 1 } = {}) {
+        const compactViewport = width <= 700 || height <= 520 || (scale > 1.1 && width <= 960);
+        return /tornpda/i.test(userAgent) || compactViewport ? "mobile" : "desktop";
+    }
+
+    function currentRuntimeMode() {
+        const visualViewport = window.visualViewport;
+        return runtimeMode({
+            userAgent: navigator.userAgent || "",
+            width: Math.min(window.innerWidth, visualViewport?.width || window.innerWidth),
+            height: Math.min(window.innerHeight, visualViewport?.height || window.innerHeight),
+            scale: visualViewport?.scale || 1
+        });
+    }
+
+    function applyRuntimeMode() {
+        const mode = currentRuntimeMode();
+        state.runtimeMode = mode;
+        document.getElementById(ROOT_ID)?.setAttribute("data-runtime", mode);
+        return mode;
+    }
+
     function applyLayout() {
         const el = panel();
         const launcher = document.getElementById("ncc-launcher");
         if (!el || !launcher) return;
+        const mode = applyRuntimeMode();
         const layout = state.layout;
         el.style.width = `${clamp(asNumber(layout.width, DEFAULT_LAYOUT.width), 430, Math.max(430, window.innerWidth - 28))}px`;
         el.style.height = `${clamp(asNumber(layout.height, DEFAULT_LAYOUT.height), 420, Math.max(420, window.innerHeight - 28))}px`;
@@ -736,6 +760,8 @@
             el.style.right = "auto";
         }
         el.style.top = `${clamp(asNumber(layout.y, 18), 0, Math.max(0, window.innerHeight - 80))}px`;
+        el.classList.toggle("ncc-compact", mode === "mobile");
+        launcher.classList.toggle("ncc-compact", mode === "mobile");
         el.classList.toggle("ncc-hidden", Boolean(layout.minimized));
         launcher.classList.toggle("ncc-hidden", !layout.minimized);
     }
@@ -811,8 +837,14 @@
                 .ncc-table-wrap { overflow:auto; border:1px solid #29465d; border-radius:8px; }
                 .ncc-table { width:100%; border-collapse:collapse; font-size:10.5px; white-space:nowrap; }
                 .ncc-team-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:7px; }
+                .ncc-team-list { display:flex; flex-direction:column; gap:8px; }
                 .ncc-team-card { min-width:0; min-height:90px; padding:7px; border:1px solid #294961; border-radius:8px; background:#0b1927; }
                 .ncc-team-card.ncc-misplaced { border-color:#8b6d32; background:#2a251b; }
+                .ncc-team-list .ncc-team-card { min-height:0; padding:10px 12px; }
+                .ncc-team-list .ncc-team-line { margin-top:6px; font-size:11px; line-height:1.3; }
+                .ncc-team-list .ncc-team-name { font-size:12px; }
+                .ncc-team-list .ncc-team-meta, .ncc-team-list .ncc-team-assigned, .ncc-team-list .ncc-team-effects { font-size:10px; }
+                .ncc-team-list .ncc-team-select { width:min(340px,58%); min-height:29px; font-size:10px; }
                 .ncc-team-top, .ncc-team-line { display:flex; align-items:center; min-width:0; gap:5px; }
                 .ncc-team-top input { flex:0 0 auto; margin:0; accent-color:#48dcb9; }
                 .ncc-team-name { overflow:hidden; flex:1; color:#e6f3fa; font-size:10px; font-weight:800; text-overflow:ellipsis; white-space:nowrap; }
@@ -867,6 +899,22 @@
                 .ncc-modal-head { display:flex; align-items:center; gap:8px; padding:12px; border-bottom:1px solid #29475e; background:#12283a; }
                 .ncc-modal-head h2 { flex:1; margin:0; color:#e3f8f2; font-size:13px; }
                 .ncc-modal-body { padding:12px; }
+                #${ROOT_ID}[data-runtime="mobile"] #ncc-panel { inset:max(4px, env(safe-area-inset-top)) 4px max(4px, env(safe-area-inset-bottom)) 4px !important; width:auto !important; height:auto !important; min-width:0; min-height:0; border-radius:11px; resize:none; }
+                #${ROOT_ID}[data-runtime="mobile"] #ncc-launcher { top:max(10px, env(safe-area-inset-top)); right:10px; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-head { min-height:54px; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-grid, #${ROOT_ID}[data-runtime="mobile"] .ncc-grid.ncc-grid-2 { grid-template-columns:1fr; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-card { min-height:73px; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-value { font-size:18px; }
+                #${ROOT_ID}[data-runtime="mobile"] #ncc-content { padding:9px; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-table { white-space:normal; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-table th, #${ROOT_ID}[data-runtime="mobile"] .ncc-table td { padding:8px 6px; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-input[type="search"] { min-width:130px; flex:1; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-summary-strip { grid-template-columns:repeat(2,minmax(120px,1fr)); }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-team-grid { grid-template-columns:1fr; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-team-card { min-height:96px; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-team-select { width:60%; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-refresh-button { width:29px; padding:0; }
+                #${ROOT_ID}[data-runtime="mobile"] .ncc-refresh-label { display:none; }
                 @media (max-width: 820px) { .ncc-grid, .ncc-grid.ncc-grid-3 { grid-template-columns:repeat(2,minmax(0,1fr)); } .ncc-summary-strip { grid-template-columns:repeat(3,minmax(120px,1fr)); } .ncc-team-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
                 @media (max-width: 680px) { #ncc-panel { inset:max(4px, env(safe-area-inset-top)) 4px max(4px, env(safe-area-inset-bottom)) 4px !important; width:auto !important; height:auto !important; min-width:0; min-height:0; border-radius:11px; resize:none; } #ncc-launcher { top:max(10px, env(safe-area-inset-top)); right:10px; } .ncc-head { min-height:54px; } .ncc-grid, .ncc-grid.ncc-grid-2 { grid-template-columns:1fr; } .ncc-card { min-height:73px; } .ncc-value { font-size:18px; } #ncc-content { padding:9px; } .ncc-table { white-space:normal; } .ncc-table th, .ncc-table td { padding:8px 6px; } .ncc-input[type="search"] { min-width:130px; flex:1; } .ncc-summary-strip { grid-template-columns:repeat(2,minmax(120px,1fr)); } .ncc-team-grid { grid-template-columns:1fr; } .ncc-team-card { min-height:96px; } .ncc-team-select { width:60%; } .ncc-refresh-button { width:29px; padding:0; } .ncc-refresh-label { display:none; } }
             </style>
@@ -966,18 +1014,20 @@
 
     function renderTeam() {
         const positions = projectionPositions();
+        const mode = currentRuntimeMode();
         const filter = state.teamFilter.trim().toLowerCase();
         let rows = employeeRows().filter((row) => !filter || `${row.name} ${row.currentPosition} ${row.status}`.toLowerCase().includes(filter));
         rows = sortRows(rows, { key: (row) => ({ total: row.currentEfficiency, assignedPosition: row.assignedPosition, assignedEfficiency: row.assignedEfficiency, wage: row.wage, name: row.name, days: row.days, addiction: row.addiction, inactivity: row.inactivity, position: row.currentPosition, best: row.bestPosition }[state.sort.team.key]), dir: state.sort.team.dir });
         const selectOptions = (row) => [...new Set([row.currentPosition, ...positions].filter(Boolean))].map((position) => `<option value="${escapeHtml(position)}" ${position === row.assignedPosition ? "selected" : ""}>${escapeHtml(position)}</option>`).join("");
-        const table = rows.length ? `<div class="ncc-team-grid">${rows.map((row) => {
+        const table = rows.length ? `<div class="${mode === "desktop" ? "ncc-team-list" : "ncc-team-grid"}">${rows.map((row) => {
             const misplaced = row.assignedPosition && row.currentPosition && row.assignedPosition !== row.currentPosition;
             const lastAction = row.lastAction ? timeAgo(row.lastAction * 1000) : "—";
             return `<article class="ncc-team-card ${misplaced ? "ncc-misplaced" : ""}"><div class="ncc-team-top"><input type="checkbox" data-lock-employee="${row.id}" ${row.locked ? "checked" : ""} title="Lock: keep this employee in their current position during auto-assign"><b class="ncc-team-name" title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</b><span class="ncc-team-meta">${escapeHtml(row.status)} · ${formatOptionalNumber(row.days)}d</span></div><div class="ncc-team-line"><span class="ncc-team-current" title="Current position and preferred TornStats total effectiveness"><b>Current:</b> ${escapeHtml(row.currentPosition || "—")} · ${formatOptionalNumber(row.currentEfficiency, 1)}</span><span class="ncc-team-meta">${escapeHtml(row.currentEfficiencySource)}</span></div><div class="ncc-team-line"><select class="ncc-select ncc-team-select" data-assignment="${row.id}" title="Assigned position for this local projection" ${positions.length ? "" : "disabled"}>${selectOptions(row) || "<option>Load projections</option>"}</select><span class="ncc-team-assigned" title="Assigned efficiency"><b>Assigned:</b> ${formatOptionalNumber(row.assignedEfficiency, 1)} · ${formatSignedNumber(row.nonWorkingDelta)}</span></div><div class="ncc-team-line ncc-team-effects"><span class="${asNumber(row.addiction) < 0 ? "ncc-bad" : ""}">Addiction ${formatSignedNumber(row.addiction)}</span><span class="${asNumber(row.inactivity) < 0 ? "ncc-bad" : ""}">Inactivity ${formatSignedNumber(row.inactivity)}</span><span title="Best-fit projected position">Best ${escapeHtml(row.bestPosition || "—")} ${formatOptionalNumber(row.bestEfficiency, 1)}</span></div><div class="ncc-team-line ncc-team-effects"><span>Wage ${formatMoney(row.wage, true)} · Last action ${escapeHtml(lastAction)}</span></div></article>`;
         }).join("")}</div>` : `<div class="ncc-notice">No employee rows match the filter, or employee details are not available for this API key.</div>`;
         const values = rows.map((row) => row.currentEfficiency).filter((value) => value !== null);
         const affected = rows.filter((row) => asNumber(row.addiction) < 0 || asNumber(row.inactivity) < 0).length;
-        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-team-filter" type="search" value="${escapeHtml(state.teamFilter)}" placeholder="Filter employee or role"><button class="ncc-button ncc-primary" data-action="load-projections" title="Sends work-stat triplets to TornStats (only after consent) and refreshes each employee’s role efficiency options" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button><button class="ncc-button" data-tab="planner">Open capacity planner</button><span class="ncc-help">${formatNumber(rows.length)} staff · ${formatNumber(state.data?.profile?.employees?.capacity)} capacity · Avg. ${values.length ? formatNumber(values.reduce((sum, value) => sum + asNumber(value), 0) / values.length, 1) : "—"} effectiveness · ${formatNumber(affected)} with penalties</span></div>${section("Employee efficiency", table)}<p class="ncc-note">Current Eff. and assigned efficiency use TornStats role base + Torn’s non-working-stat effect delta when available; Torn’s direct total is only the fallback before projections load.</p>`;
+        const runtimeLabel = mode === "mobile" ? /tornpda/i.test(navigator.userAgent || "") ? "TornPDA / compact cards" : "Compact mobile cards" : "Desktop detailed list";
+        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-team-filter" type="search" value="${escapeHtml(state.teamFilter)}" placeholder="Filter employee or role"><button class="ncc-button ncc-primary" data-action="load-projections" title="Sends work-stat triplets to TornStats (only after consent) and refreshes each employee’s role efficiency options" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button><button class="ncc-button" data-tab="planner">Open capacity planner</button><span class="ncc-help">${runtimeLabel} · ${formatNumber(rows.length)} staff · ${formatNumber(state.data?.profile?.employees?.capacity)} capacity · Avg. ${values.length ? formatNumber(values.reduce((sum, value) => sum + asNumber(value), 0) / values.length, 1) : "—"} effectiveness · ${formatNumber(affected)} with penalties</span></div>${section("Employee efficiency", table)}<p class="ncc-note">Current Eff. and assigned efficiency use TornStats role base + Torn’s non-working-stat effect delta when available; Torn’s direct total is only the fallback before projections load.</p>`;
     }
 
     function formatSignedNumber(value, digits = 1) {
@@ -1097,16 +1147,20 @@
         return prior ? asNumber(item?.in_stock) - asNumber(prior.inStock) : null;
     }
 
+    function currentStockWorth(item) {
+        return asNumber(item?.in_stock) * asNumber(item?.price);
+    }
+
     function renderStock() {
         const totals = stockMetrics();
         const previous = previousStockSnapshot();
         let rows = Array.isArray(state.data?.stock) ? [...state.data.stock] : [];
         const sort = state.sort.stock;
-        rows = sortRows(rows, { key: (item) => sort.key === "margin" ? asNumber(item.sold_worth) - asNumber(item.cost) * asNumber(item.sold_amount) : sort.key === "difference" ? stockDifference(item, previous) : item[sort.key], dir: sort.dir });
-        const table = rows.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr>${sortHeader("Item", "name", "stock")}${sortHeader("In stock", "in_stock", "stock")}${sortHeader("Stock difference", "difference", "stock")}${sortHeader("On order", "on_order", "stock")}${sortHeader("Cost", "cost", "stock")}${sortHeader("Price", "price", "stock")}${sortHeader("Sold", "sold_amount", "stock")}${sortHeader("Sold worth", "sold_worth", "stock")}${sortHeader("Gross margin", "margin", "stock")}</tr></thead><tbody>${rows.map((item) => {
+        rows = sortRows(rows, { key: (item) => sort.key === "margin" ? asNumber(item.sold_worth) - asNumber(item.cost) * asNumber(item.sold_amount) : sort.key === "difference" ? stockDifference(item, previous) : sort.key === "current_worth" ? currentStockWorth(item) : item[sort.key], dir: sort.dir });
+        const table = rows.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr>${sortHeader("Item", "name", "stock")}${sortHeader("In stock", "in_stock", "stock")}${sortHeader("Current stock worth", "current_worth", "stock")}${sortHeader("Stock difference", "difference", "stock")}${sortHeader("On order", "on_order", "stock")}${sortHeader("Cost", "cost", "stock")}${sortHeader("Price", "price", "stock")}${sortHeader("Sold", "sold_amount", "stock")}${sortHeader("Sold worth", "sold_worth", "stock")}${sortHeader("Gross margin", "margin", "stock")}</tr></thead><tbody>${rows.map((item) => {
             const margin = asNumber(item.sold_worth) - asNumber(item.cost) * asNumber(item.sold_amount);
             const difference = stockDifference(item, previous);
-            return `<tr><td><b>${escapeHtml(item.name || "Unknown")}</b><br><span class="ncc-muted">ID ${formatNumber(item.id)}</span></td><td>${formatNumber(item.in_stock)}</td><td class="${difference === null ? "ncc-muted" : difference > 0 ? "ncc-good" : difference < 0 ? "ncc-bad" : ""}">${difference === null ? "—" : formatSignedNumber(difference)}</td><td>${formatNumber(item.on_order)}</td><td>${formatMoney(item.cost)}</td><td>${formatMoney(item.price)}</td><td>${formatNumber(item.sold_amount)}</td><td>${formatMoney(item.sold_worth)}</td><td class="${margin >= 0 ? "ncc-good" : "ncc-bad"}">${formatMoney(margin)}</td></tr>`;
+            return `<tr><td><b>${escapeHtml(item.name || "Unknown")}</b><br><span class="ncc-muted">ID ${formatNumber(item.id)}</span></td><td>${formatNumber(item.in_stock)}</td><td class="ncc-good">${formatMoney(currentStockWorth(item))}</td><td class="${difference === null ? "ncc-muted" : difference > 0 ? "ncc-good" : difference < 0 ? "ncc-bad" : ""}">${difference === null ? "—" : formatSignedNumber(difference)}</td><td>${formatNumber(item.on_order)}</td><td>${formatMoney(item.cost)}</td><td>${formatMoney(item.price)}</td><td>${formatNumber(item.sold_amount)}</td><td>${formatMoney(item.sold_worth)}</td><td class="${margin >= 0 ? "ncc-good" : "ncc-bad"}">${formatMoney(margin)}</td></tr>`;
         }).join("")}</tbody></table></div>` : `<div class="ncc-notice warn">Stock details require a Limited or higher Torn API key.</div>`;
         return `${dataNotice()}<div class="ncc-grid ncc-grid-3">${metricCard("Stock items", formatNumber(totals.inStock), `${formatNumber(totals.onOrder)} on order`)}${metricCard("Stock value", formatMoney(totals.saleValue), `${formatMoney(totals.costValue)} at cost`, "ncc-good")}${metricCard("Reported gross margin", formatMoney(totals.margin), `${formatMoney(totals.soldWorth)} sold worth`, totals.margin >= 0 ? "ncc-good" : "ncc-bad")}</div>${section("Stock & sales", table)}<p class="ncc-note">Stock difference is today’s in-stock amount minus the last local Torn reporting-day snapshot. It appears after a prior daily snapshot exists. Reported gross margin = sold worth − (cost × sold amount).</p>`;
     }
@@ -1434,7 +1488,13 @@
         handle.addEventListener("pointerup", endDrag);
         handle.addEventListener("pointercancel", endDrag);
         el.addEventListener("pointerup", () => { void persistLayout(); });
-        window.addEventListener("resize", () => applyLayout());
+        const handleRuntimeResize = () => {
+            const priorMode = state.runtimeMode;
+            applyLayout();
+            if (priorMode !== state.runtimeMode) render();
+        };
+        window.addEventListener("resize", handleRuntimeResize);
+        window.visualViewport?.addEventListener("resize", handleRuntimeResize);
     }
 
     function resetAutoRefresh() {
@@ -1466,7 +1526,7 @@
         window.addEventListener("beforeunload", () => { void persistLayout(); });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendPerformance };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendPerformance, runtimeMode };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof document !== "undefined" && typeof window !== "undefined") {
         if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { void boot(); }, { once: true });

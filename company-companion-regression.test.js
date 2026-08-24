@@ -111,6 +111,10 @@ test("stock difference compares current stock to the prior reporting-day snapsho
     assert.equal(companion.stockDifference(item, companion.previousStockSnapshot([], 300)), null);
 });
 
+test("current stock worth uses current quantity and sale price", () => {
+    assert.equal(companion.currentStockWorth({ in_stock: 125, price: 42 }), 5250);
+});
+
 test("current effectiveness combines TornStats role base with Torn non-working effects", () => {
     assert.equal(companion.preferredCurrentEfficiency(130, 102, 26), 128);
     assert.equal(companion.preferredCurrentEfficiency(130, undefined, 26), 130);
@@ -132,4 +136,10 @@ test("trend performance compares available daily signals with the prior day", ()
         { dailyIncome: 100, stockValue: 100, averageEmployeeEfficiency: 100, rating: 5 }
     );
     assert.equal(result.label, "Improving");
+});
+
+test("runtime mode detects TornPDA and constrained scaled viewports", () => {
+    assert.equal(companion.runtimeMode({ userAgent: "TornPDA", width: 1200, height: 800 }), "mobile");
+    assert.equal(companion.runtimeMode({ width: 760, height: 700, scale: 1.25 }), "mobile");
+    assert.equal(companion.runtimeMode({ width: 1200, height: 800, scale: 1 }), "desktop");
 });
