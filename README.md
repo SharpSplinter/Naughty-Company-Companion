@@ -34,7 +34,7 @@ Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn compa
 - Overview, Team, Planner, Rankings, Stock, Trends, and Settings tabs.
 - Explicit refresh labels explaining which data will be loaded.
 - Persistent panel position, size, selected tab, plans, capacities, priorities, and local history.
-- Explicit TornPDA/user-agent and effective viewport/scale detection. Team uses a detailed top-to-bottom list on desktop and compact cards on TornPDA or constrained mobile viewports.
+- Explicit TornPDA/user-agent and effective viewport/scale detection. Compact mode activates at an effective width ≤700px, effective height ≤520px, or scale >1.1 at ≤960px. Team uses a detailed top-to-bottom list on desktop and compact cards in TornPDA or compact mode.
 - Desktop drag/resize/minimize controls and a safe mobile TornPDA layout.
 
 ## Installation
