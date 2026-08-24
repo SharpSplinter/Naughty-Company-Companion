@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.1.8
+// @version      1.2.0
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/companies.php*
@@ -23,14 +23,15 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.1.8";
+    const VERSION = "1.2.0";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
+    const PDA_INJECTED_TORN_KEY = "_###PDA-APIKEY###_";
     const DAY = 86400000;
-    const RANKING_TTL = 15 * 60 * 1000;
     const PROJECTION_TTL = 24 * 60 * 60 * 1000;
     const DAILY_TICK_HOUR_UTC = 18;
+    const DAILY_RANKINGS_REFRESH_MINUTE = 5;
     const DAILY_ALERTS = Object.freeze({
         income: {
             minute: 0,
@@ -50,6 +51,11 @@
     const EFFECTIVENESS_ALERT_THRESHOLD = -12;
     const COMPACT_LAYOUT_MAX_WIDTH = 820;
     const PANEL_MARGIN = 14;
+    const STORAGE_WRITE_DEBOUNCE_MS = 120;
+    const BACKUP_FORMAT = "naughty-company-companion-backup";
+    const BACKUP_NAMESPACE = "naughty-company-companion";
+    const BACKUP_SCHEMA_VERSION = 1;
+    const BACKUP_MAX_BYTES = 8 * 1024 * 1024;
     const DIAGNOSTIC_PREFIX = "[Naughty Company Companion]";
     const STORE = {
         settings: "ncc:settings:v1",
@@ -70,6 +76,7 @@
         tornStatsKey: "",
         projectionConsent: false,
         includeStockCost: true,
+        useLegacyGMStorage: false,
         autoRefreshMinutes: 10,
         activeTab: "overview",
         assignments: {},
@@ -104,6 +111,7 @@
         runtimeMode: "desktop",
         storageWarning: "",
         modal: null,
+        pendingRestore: null,
         autoRefreshId: null
     };
     const dailyAlertRuntime = {
@@ -111,6 +119,9 @@
         liveTimerId: null,
         inFlight: new Set(),
         reminderRefreshPromise: null
+    };
+    const rankingsRefreshRuntime = {
+        timerId: null
     };
     const storage = {
         cache: {},
@@ -134,6 +145,7 @@
         return Number.isFinite(number) ? number : fallback;
     };
     const asFinite = (value) => {
+        if (value === null || value === undefined || value === "") return null;
         const number = Number(value);
         return Number.isFinite(number) ? number : null;
     };
@@ -178,6 +190,19 @@
         if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
         return `${Math.floor(seconds / 86400)}d ago`;
     };
+    const documentIsHidden = () => {
+        try {
+            return typeof document !== "undefined" && document.hidden === true;
+        } catch {
+            return false;
+        }
+    };
+    const injectedTornApiKey = () => {
+        const key = String(PDA_INJECTED_TORN_KEY || "").trim();
+        return key.includes("###PDA-APIKEY###") ? "" : key;
+    };
+    const activeTornApiKey = () => String(state.settings.tornKey || "").trim() || injectedTornApiKey();
+    const hasTornApiKey = () => Boolean(activeTornApiKey());
     const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
     const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const sortRows = (rows, { key, dir }) => [...rows].sort((left, right) => {
@@ -196,6 +221,100 @@
         positionCapacities: isObject(raw?.positionCapacities) ? raw.positionCapacities : {},
         positionPriority: isObject(raw?.positionPriority) ? raw.positionPriority : {}
     });
+
+    function jsonBackupClone(value, fallback = null) {
+        try {
+            const serialized = JSON.stringify(value);
+            return serialized === undefined ? fallback : JSON.parse(serialized);
+        } catch {
+            return fallback;
+        }
+    }
+
+    function createCompanyBackupDocument(values, { includeApiKeys = false, timestamp = Date.now(), appVersion = VERSION } = {}) {
+        const source = isObject(values) ? values : {};
+        const stores = Object.fromEntries(STORE_KEYS.map((key) => [key, jsonBackupClone(source[key], key === STORE.cache ? null : {})]));
+        stores[STORE.settings] = isObject(stores[STORE.settings]) ? stores[STORE.settings] : {};
+        if (!includeApiKeys) {
+            delete stores[STORE.settings].tornKey;
+            delete stores[STORE.settings].tornStatsKey;
+        }
+        return {
+            format: BACKUP_FORMAT,
+            namespace: BACKUP_NAMESPACE,
+            schemaVersion: BACKUP_SCHEMA_VERSION,
+            appVersion: String(appVersion),
+            createdAt: new Date(timestamp).toISOString(),
+            includesApiKeys: Boolean(includeApiKeys),
+            stores
+        };
+    }
+
+    function backupValidationError(message) {
+        throw new Error(`Backup is invalid: ${message}.`);
+    }
+
+    function validateCompanyBackupDocument(raw) {
+        if (!isObject(raw)) backupValidationError("expected a JSON object");
+        const allowedTopLevel = new Set(["format", "namespace", "schemaVersion", "appVersion", "createdAt", "includesApiKeys", "stores"]);
+        if (Object.keys(raw).some((key) => !allowedTopLevel.has(key))) backupValidationError("contains unsupported top-level fields");
+        if (raw.format !== BACKUP_FORMAT) backupValidationError("wrong backup format");
+        if (raw.namespace !== BACKUP_NAMESPACE) backupValidationError("wrong script namespace");
+        if (raw.schemaVersion !== BACKUP_SCHEMA_VERSION) backupValidationError("unsupported schema version");
+        if (typeof raw.appVersion !== "string" || !raw.appVersion.trim()) backupValidationError("missing application version");
+        if (typeof raw.createdAt !== "string" || Number.isNaN(Date.parse(raw.createdAt))) backupValidationError("invalid creation time");
+        if (typeof raw.includesApiKeys !== "boolean") backupValidationError("invalid API-key inclusion flag");
+        if (!isObject(raw.stores)) backupValidationError("missing store payload");
+        const storeNames = Object.keys(raw.stores);
+        if (storeNames.length !== STORE_KEYS.length || STORE_KEYS.some((key) => !hasOwn(raw.stores, key)) || storeNames.some((key) => !STORE_KEYS.includes(key))) backupValidationError("store namespace does not match this companion");
+        if (!isObject(raw.stores[STORE.settings])) backupValidationError("invalid settings payload");
+        if (raw.stores[STORE.cache] !== null && !isObject(raw.stores[STORE.cache])) backupValidationError("invalid cached snapshot payload");
+        [STORE.history, STORE.rankings, STORE.projections, STORE.rankHistory, STORE.starCohorts, STORE.layout, STORE.dailyAlerts, STORE.dailyReminders].forEach((key) => {
+            if (!isObject(raw.stores[key])) backupValidationError(`invalid ${key} payload`);
+        });
+        const settings = raw.stores[STORE.settings];
+        const allowedSettings = new Set(Object.keys(DEFAULT_SETTINGS));
+        if (Object.keys(settings).some((key) => !allowedSettings.has(key))) backupValidationError("settings payload contains unsupported fields");
+        ["projectionConsent", "includeStockCost", "useLegacyGMStorage"].forEach((key) => {
+            if (hasOwn(settings, key) && typeof settings[key] !== "boolean") backupValidationError(`invalid ${key} setting`);
+        });
+        if (hasOwn(settings, "autoRefreshMinutes") && (!Number.isFinite(Number(settings.autoRefreshMinutes)) || Number(settings.autoRefreshMinutes) < 2 || Number(settings.autoRefreshMinutes) > 120)) backupValidationError("invalid automatic refresh setting");
+        if (hasOwn(settings, "activeTab") && typeof settings.activeTab !== "string") backupValidationError("invalid active-tab setting");
+        ["assignments", "lockedEmployees", "positionCapacities", "positionPriority"].forEach((key) => {
+            if (hasOwn(settings, key) && !isObject(settings[key])) backupValidationError(`invalid ${key} setting`);
+        });
+        if (raw.includesApiKeys) {
+            if (typeof settings.tornKey !== "string" || typeof settings.tornStatsKey !== "string") backupValidationError("API-key backup is incomplete");
+        } else if (hasOwn(settings, "tornKey") || hasOwn(settings, "tornStatsKey")) {
+            backupValidationError("non-key backup contains API-key fields");
+        }
+        return jsonBackupClone(raw);
+    }
+
+    function materializeCompanyBackupStores(backup, { currentSettings = state.settings, restoreApiKeys = false } = {}) {
+        const validated = validateCompanyBackupDocument(backup);
+        const current = deepMergeSettings(currentSettings);
+        const restoredSettings = deepMergeSettings(validated.stores[STORE.settings]);
+        const restoreKeys = Boolean(restoreApiKeys) && validated.includesApiKeys;
+        if (!restoreKeys) {
+            restoredSettings.tornKey = current.tornKey;
+            restoredSettings.tornStatsKey = current.tornStatsKey;
+        }
+        // Storage selection is runtime-local: apply the payload through the currently selected adapter.
+        restoredSettings.useLegacyGMStorage = current.useLegacyGMStorage;
+        return {
+            [STORE.settings]: restoredSettings,
+            [STORE.cache]: validated.stores[STORE.cache],
+            [STORE.history]: validated.stores[STORE.history],
+            [STORE.rankings]: validated.stores[STORE.rankings],
+            [STORE.projections]: validated.stores[STORE.projections],
+            [STORE.rankHistory]: validated.stores[STORE.rankHistory],
+            [STORE.starCohorts]: validated.stores[STORE.starCohorts],
+            [STORE.layout]: { ...DEFAULT_LAYOUT, ...validated.stores[STORE.layout] },
+            [STORE.dailyAlerts]: validated.stores[STORE.dailyAlerts],
+            [STORE.dailyReminders]: validated.stores[STORE.dailyReminders]
+        };
+    }
 
     function safeRequestDescriptor(url, method = "GET") {
         const normalizedMethod = String(method || "GET").toUpperCase();
@@ -258,6 +377,16 @@
         } catch {
             return null;
         }
+    }
+
+    function hasLegacyStoragePreference(values) {
+        return hasOwn(values?.[STORE.settings], "useLegacyGMStorage");
+    }
+
+    function storageMethodLabel({ mode = storage.mode, useLegacyGMStorage = state.settings.useLegacyGMStorage } = {}) {
+        if (useLegacyGMStorage) return "Legacy GM storage (selected)";
+        if (mode === "pda") return "TornPDA PDA_storage (primary)";
+        return "Compatible GM/local fallback";
     }
 
     async function legacyGet(key, fallback) {
@@ -329,11 +458,124 @@
         }
     }
 
-    async function storeSetMany(values) {
+    function createStorageAdapter({
+        keys = STORE_KEYS,
+        getNative = () => null,
+        legacy = {},
+        preferNative = () => true,
+        writeMany = null,
+        debounceMs = STORAGE_WRITE_DEBOUNCE_MS,
+        setTimer = setTimeout,
+        clearTimer = clearTimeout
+    } = {}) {
+        const allowed = new Set(keys);
+        let queue = {};
+        let timer = null;
+        let flushing = null;
+        let waiters = [];
+        const known = (values) => Object.fromEntries(Object.entries(values || {}).filter(([key]) => allowed.has(key)));
+        const resolveWaiters = (list, error = null) => list.forEach(({ resolve, reject }) => error ? reject(error) : resolve());
+        const loadLegacy = async () => {
+            const values = await legacy.loadAll?.();
+            return isObject(values) ? values : {};
+        };
+        const nativePreferred = () => preferNative() && getNative()?.loadAll && getNative()?.setMany;
+
+        async function load() {
+            const legacyValues = await loadLegacy();
+            const native = nativePreferred() ? getNative() : null;
+            if (!native) return { values: legacyValues, mode: "legacy", migrated: {} };
+            try {
+                const loaded = await native.loadAll();
+                const nativeValues = isObject(loaded) ? loaded : {};
+                const migrated = Object.fromEntries([...allowed].filter((key) => !hasOwn(nativeValues, key) && hasOwn(legacyValues, key)).map((key) => [key, legacyValues[key]]));
+                if (Object.keys(migrated).length) await native.setMany(migrated);
+                return { values: { ...legacyValues, ...nativeValues }, mode: "pda", migrated };
+            } catch (error) {
+                return { values: legacyValues, mode: "legacy", migrated: {}, error };
+            }
+        }
+
+        async function writeNow(values) {
+            if (typeof writeMany === "function") return writeMany(values);
+            const native = nativePreferred() ? getNative() : null;
+            if (native) {
+                try {
+                    await native.setMany(values);
+                    return { mode: "pda", fallback: false };
+                } catch (error) {
+                    if (typeof legacy.setMany !== "function") throw error;
+                    await legacy.setMany(values);
+                    return { mode: "legacy", fallback: true, error };
+                }
+            }
+            if (typeof legacy.setMany !== "function") throw new Error("No compatible storage writer is available.");
+            await legacy.setMany(values);
+            return { mode: "legacy", fallback: false };
+        }
+
+        function flush() {
+            if (flushing) return flushing;
+            if (timer) {
+                clearTimer(timer);
+                timer = null;
+            }
+            const pending = queue;
+            const pendingWaiters = waiters;
+            queue = {};
+            waiters = [];
+            if (!Object.keys(pending).length) {
+                resolveWaiters(pendingWaiters);
+                return Promise.resolve();
+            }
+            flushing = Promise.resolve(writeNow(pending))
+                .then(() => resolveWaiters(pendingWaiters), (error) => resolveWaiters(pendingWaiters, error))
+                .finally(() => {
+                    flushing = null;
+                    if (Object.keys(queue).length) void flush();
+                });
+            return flushing;
+        }
+
+        function setMany(values, { immediate = false } = {}) {
+            const next = known(values);
+            if (!Object.keys(next).length) return Promise.resolve();
+            return new Promise((resolve, reject) => {
+                Object.assign(queue, next);
+                waiters.push({ resolve, reject });
+                if (immediate || flushing) {
+                    void flush();
+                    return;
+                }
+                if (timer) clearTimer(timer);
+                timer = setTimer(() => { void flush(); }, debounceMs);
+            });
+        }
+
+        async function deleteKey(key) {
+            delete queue[key];
+            if (timer && !Object.keys(queue).length) void flush();
+            const native = getNative();
+            let nativeError = null;
+            if (native?.delete) {
+                try {
+                    await native.delete(key);
+                } catch (error) {
+                    nativeError = error;
+                }
+            }
+            if (typeof legacy.delete === "function") await legacy.delete(key);
+            if (nativeError && typeof legacy.delete !== "function") throw nativeError;
+            return { nativeDeleted: Boolean(native?.delete) && !nativeError, fallbackDeleted: typeof legacy.delete === "function" };
+        }
+
+        return { load, setMany, flush, delete: deleteKey, pending: () => ({ ...queue }) };
+    }
+
+    async function writeStoreSetMany(values) {
         const entries = Object.entries(values).filter(([key]) => STORE_KEYS.includes(key));
         if (!entries.length) return;
         const next = Object.fromEntries(entries);
-        Object.assign(storage.cache, next);
         if (storage.mode === "pda" && storage.pda) {
             try {
                 await storage.pda.setMany(next);
@@ -354,29 +596,114 @@
         }
     }
 
-    async function storeSet(key, value) {
-        await storeSetMany({ [key]: value });
+    const storageWriter = createStorageAdapter({
+        keys: STORE_KEYS,
+        getNative: () => storage.pda || getPdaStorage(),
+        legacy: { delete: legacyDelete },
+        writeMany: writeStoreSetMany
+    });
+
+    function flushStorageWrites() {
+        return storageWriter.flush();
+    }
+
+    function storeSetMany(values, { immediate = false } = {}) {
+        const entries = Object.entries(values).filter(([key]) => STORE_KEYS.includes(key));
+        if (!entries.length) return Promise.resolve();
+        const next = Object.fromEntries(entries);
+        Object.assign(storage.cache, next);
+        return storageWriter.setMany(next, { immediate });
+    }
+
+    function storeSet(key, value, options = {}) {
+        return storeSetMany({ [key]: value }, options);
     }
 
     async function storeDelete(key) {
         delete storage.cache[key];
-        if (storage.pda) {
-            try {
-                await storage.pda.delete(key);
-            } catch (error) {
-                showStorageWarning(error);
-            }
-        }
-        await legacyDelete(key);
+        const result = await storageWriter.delete(key);
+        if (!result.nativeDeleted && getPdaStorage()) showStorageWarning(new Error("PDA_storage delete failed."));
         storage.fallbackKeys.delete(key);
         await persistFallbackKeys();
     }
 
-    async function loadStoredValues() {
+    async function switchStoragePreference(useLegacyGMStorage) {
+        const snapshot = Object.fromEntries(STORE_KEYS.filter((key) => hasOwn(storage.cache, key)).map((key) => [key, storage.cache[key]]));
+        snapshot[STORE.settings] = state.settings;
+        if (useLegacyGMStorage) {
+            try {
+                const pda = storage.pda || getPdaStorage();
+                if (pda) {
+                    try {
+                        await pda.setMany({ [STORE.settings]: state.settings });
+                    } catch (error) {
+                        warningLog("storage:legacy preference native mirror failed", { reason: safeDiagnosticError(error) });
+                    }
+                }
+                await legacySetMany(snapshot);
+                Object.assign(storage.cache, snapshot);
+                storage.pda = null;
+                storage.mode = "legacy";
+                storage.fallbackKeys.clear();
+                await persistFallbackKeys();
+                state.storageWarning = "";
+                debugLog("storage:legacy selected", { cachedKeys: Object.keys(snapshot).length });
+                return true;
+            } catch (error) {
+                state.storageWarning = "Unable to switch to legacy GM storage; the current storage method remains active.";
+                storageDiagnostic("storage:legacy selection failed", { reason: safeDiagnosticError(error) });
+                return false;
+            }
+        }
         const pda = getPdaStorage();
         if (!pda) {
-            const legacyValues = await loadLegacyValues();
+            try {
+                await legacySetMany(snapshot);
+                Object.assign(storage.cache, snapshot);
+                storage.pda = null;
+                storage.mode = "legacy";
+                storageDiagnostic("storage:PDA_storage unavailable", { mode: "GM/local", reason: "legacy preference cleared" });
+                return true;
+            } catch (error) {
+                showStorageWarning(error);
+                return false;
+            }
+        }
+        try {
+            await legacySet(STORE.settings, state.settings);
+            await pda.setMany(snapshot);
+            Object.assign(storage.cache, snapshot);
+            storage.pda = pda;
+            storage.mode = "pda";
+            Object.keys(snapshot).forEach((key) => storage.fallbackKeys.delete(key));
+            await persistFallbackKeys();
+            state.storageWarning = "";
+            debugLog("storage:PDA_storage selected", { cachedKeys: Object.keys(snapshot).length });
+            return true;
+        } catch (error) {
+            try {
+                await legacySetMany(snapshot);
+                Object.assign(storage.cache, snapshot);
+                storage.pda = null;
+                storage.mode = "legacy";
+                showStorageWarning(error);
+                return true;
+            } catch {
+                // The warning below tells the user the requested storage switch could not be completed.
+            }
+            storage.pda = null;
+            storage.mode = "legacy";
+            showStorageWarning(error);
+            return false;
+        }
+    }
+
+    async function loadStoredValues() {
+        const pda = getPdaStorage();
+        const legacyValues = await loadLegacyValues();
+        if (!pda) {
             storage.cache = legacyValues;
+            storage.pda = null;
             storage.mode = "legacy";
             storage.initialized = true;
             storageDiagnostic("storage:startup fallback", { mode: "GM/local", reason: "PDA_storage not exposed" });
@@ -385,7 +712,20 @@
         try {
             const loaded = await pda.loadAll();
             const pdaValues = isObject(loaded) ? loaded : {};
-            const legacyValues = await loadLegacyValues();
+            const legacySettings = deepMergeSettings(legacyValues[STORE.settings]);
+            const pdaSettings = deepMergeSettings(pdaValues[STORE.settings]);
+            const legacyPreferenceIsExplicit = hasLegacyStoragePreference(legacyValues);
+            if (legacySettings.useLegacyGMStorage || (!legacyPreferenceIsExplicit && pdaSettings.useLegacyGMStorage)) {
+                const migratingFromPda = !legacyPreferenceIsExplicit && pdaSettings.useLegacyGMStorage;
+                const mergedValues = migratingFromPda ? { ...legacyValues, ...pdaValues } : legacyValues;
+                if (migratingFromPda) await legacySetMany(mergedValues);
+                storage.cache = mergedValues;
+                storage.pda = null;
+                storage.mode = "legacy";
+                storage.initialized = true;
+                debugLog("storage:legacy selected", { migratedFromPda, cachedKeys: Object.keys(mergedValues).length });
+                return storage.cache;
+            }
             const savedFallbackKeys = await legacyGet(LEGACY_FALLBACK_KEY, []);
             storage.fallbackKeys = new Set(Array.isArray(savedFallbackKeys) ? savedFallbackKeys.filter((key) => STORE_KEYS.includes(key)) : []);
             storage.cache = { ...pdaValues };
@@ -415,7 +755,6 @@
             debugLog("storage:PDA_storage ready", { cachedKeys: Object.keys(pdaValues).length, migratedKeys: Object.keys(migrations).length });
             return storage.cache;
         } catch (error) {
-            const legacyValues = await loadLegacyValues();
             storage.cache = legacyValues;
             storage.pda = null;
             storage.mode = "legacy";
@@ -561,7 +900,7 @@
         return true;
     }
 
-    async function showDailyToast(text, tone = "good") {
+    async function showFeedbackToast(text, tone = "good", seconds = 8) {
         const colors = tone === "bad"
             ? { bgColor: { a: 255, r: 125, g: 35, b: 47 }, textColor: { a: 255, r: 255, g: 245, b: 245 } }
             : tone === "warn"
@@ -570,11 +909,22 @@
         const nativeResponse = await callConfirmedPdaHandler("showToast", {
             text,
             clickClose: true,
-            seconds: 10,
+            seconds,
             ...colors
         });
         if (pdaHandlerSucceeded(nativeResponse)) return true;
-        return showDesktopToast(text, tone, 10);
+        return showDesktopToast(text, tone, seconds);
+    }
+
+    async function showDailyToast(text, tone = "good") {
+        const stacked = showDesktopToast(text, tone, 10);
+        const colors = tone === "bad"
+            ? { bgColor: { a: 255, r: 125, g: 35, b: 47 }, textColor: { a: 255, r: 255, g: 245, b: 245 } }
+            : tone === "warn"
+                ? { bgColor: { a: 255, r: 112, g: 79, b: 20 }, textColor: { a: 255, r: 255, g: 246, b: 222 } }
+                : { bgColor: { a: 255, r: 18, g: 94, b: 74 }, textColor: { a: 255, r: 238, g: 255, b: 248 } };
+        const nativeResponse = await callConfirmedPdaHandler("showToast", { text, clickClose: true, seconds: 10, ...colors });
+        return stacked || pdaHandlerSucceeded(nativeResponse);
     }
 
     function companyPageUrl() {
@@ -644,7 +994,7 @@
     }
 
     async function persistDailyReminders() {
-        await storeSet(STORE.dailyReminders, state.dailyReminders);
+        await storeSet(STORE.dailyReminders, state.dailyReminders, { immediate: true });
     }
 
     async function scheduleDailyTickReminder(kind, { force = false } = {}) {
@@ -804,7 +1154,7 @@
     }
 
     async function torn(path, query = {}) {
-        const key = String(state.settings.tornKey || "").trim();
+        const key = activeTornApiKey();
         if (!key) throw new Error("Add a Torn API key in Settings.");
         const params = new URLSearchParams();
         Object.entries(query).forEach(([name, value]) => {
@@ -951,6 +1301,18 @@
         return timestamp >= dailyAlertPhaseTime(timestamp, minute);
     }
 
+    function rankingRefreshDay(timestamp = Date.now()) {
+        return utcDayKey(timestamp < dailyAlertPhaseTime(timestamp, DAILY_RANKINGS_REFRESH_MINUTE) ? timestamp - DAY : timestamp);
+    }
+
+    function isDailyRankingRefreshDue(timestamp = Date.now()) {
+        return timestamp >= dailyAlertPhaseTime(timestamp, DAILY_RANKINGS_REFRESH_MINUTE);
+    }
+
+    function rankingRefreshedForDailyTick(record, timestamp = Date.now()) {
+        return String(record?.dailyRefreshDay || "") === rankingRefreshDay(timestamp);
+    }
+
     function dailyAlertDataSource(data, phaseTimestamp) {
         const fetchedAt = asFinite(data?.fetchedAt);
         if (fetchedAt !== null && fetchedAt >= phaseTimestamp) return { fresh: true, label: "Live refresh" };
@@ -967,6 +1329,23 @@
         return asFinite(value) === null ? "unavailable" : formatNumber(value);
     }
 
+    function alertSignedCount(value) {
+        const number = asFinite(value);
+        return number === null ? "unavailable" : `${number > 0 ? "+" : ""}${formatNumber(number)}`;
+    }
+
+    function totalStockDifference(data = state.data, previous = previousStockSnapshot(companyHistory(data?.profile?.id))) {
+        if (data?.stockAvailable === false || !isObject(previous)) return null;
+        const current = Object.fromEntries((Array.isArray(data?.stock) ? data.stock : []).map((item) => [String(item?.id), asNumber(item?.in_stock)]));
+        const ids = new Set([...Object.keys(previous), ...Object.keys(current)]);
+        return [...ids].reduce((total, id) => total + asNumber(current[id]) - asNumber(previous?.[id]?.inStock), 0);
+    }
+
+    function dailyTickStockDifference(data) {
+        const prior = previousStockSnapshot(companyHistory(data?.profile?.id));
+        return totalStockDifference(data, prior);
+    }
+
     function buildDailyTickAlert(data, timestamp = Date.now()) {
         const profile = data?.profile || {};
         const financesNow = financials(data);
@@ -977,6 +1356,8 @@
                 `Daily Income: ${alertMoney(financesNow.dailyIncome)}`,
                 `Daily Profit: ${alertMoney(financesNow.dailyProfit)}`,
                 `Daily Customer Count: ${alertCount(profile?.customers?.daily)}`,
+                `Star Level: ${formatNumber(ratingOf(profile))}★`,
+                `Stock Difference vs prior day: ${alertSignedCount(dailyTickStockDifference(data))}`,
                 source.label
             ].join("\n"),
             source
@@ -995,7 +1376,7 @@
     }
 
     function formatEffectivenessAlertValue(value) {
-        return `${value > 0 ? "+" : ""}${formatOptionalNumber(value, 1)}`;
+        return `${value > 0 ? "+" : ""}${formatOptionalNumber(value)}`;
     }
 
     function buildEmployeeRiskAlert(data, timestamp = Date.now()) {
@@ -1060,17 +1441,21 @@
         const scope = dailyAlertScope();
         if (!scope) return;
         state.dailyAlerts = { ...state.dailyAlerts, [scope]: { ...dailyAlertRecord(), [kind]: utcDayKey(timestamp) } };
-        await storeSet(STORE.dailyAlerts, state.dailyAlerts);
+        await storeSet(STORE.dailyAlerts, state.dailyAlerts, { immediate: true });
     }
 
-    async function runDailyTickAlerts({ refresh = false } = {}) {
+    async function runDailyTickAlerts({ refresh = false, scheduled = false } = {}) {
+        if (scheduled && documentIsHidden()) {
+            debugLog("refresh:paused", { source: "daily tick", reason: "document hidden" });
+            return false;
+        }
         const now = Date.now();
-        if (!String(state.settings.tornKey || "").trim()) return;
+        if (!hasTornApiKey()) return false;
         let pending = pendingDailyAlertKinds(now);
         if (!pending.length) return;
         if (refresh && dailyAlertRefreshNeeded(pending, now)) {
             if (state.loading) return;
-            await refreshCore({ silent: true, suppressDailyAlerts: true });
+            await refreshCore({ silent: true, suppressDailyAlerts: true, scheduled });
         }
         if (!state.data?.profile) return;
         const firedAt = Date.now();
@@ -1082,7 +1467,7 @@
                 const payload = dailyAlertPayload(kind, state.data, firedAt);
                 if (await deliverDailyAlert(kind, payload)) await markDailyAlertFired(kind, firedAt);
             } catch (error) {
-                console.warn("[Naughty Company Companion] Daily alert could not be delivered.", error);
+                warningLog("daily alert:delivery failed", { kind, reason: safeDiagnosticError(error) });
             } finally {
                 dailyAlertRuntime.inFlight.delete(inFlightKey);
             }
@@ -1092,13 +1477,21 @@
     function scheduleDailyTickAlerts() {
         if (dailyAlertRuntime.timerId) clearTimeout(dailyAlertRuntime.timerId);
         if (dailyAlertRuntime.liveTimerId) clearTimeout(dailyAlertRuntime.liveTimerId);
+        dailyAlertRuntime.timerId = null;
+        dailyAlertRuntime.liveTimerId = null;
+        if (documentIsHidden()) {
+            debugLog("refresh:paused", { source: "daily tick timer", reason: "document hidden" });
+            return;
+        }
         const target = nextDailyAlertTimestamp();
         const delay = Math.max(0, target - Date.now() - 1000);
         dailyAlertRuntime.timerId = setTimeout(async () => {
+            if (documentIsHidden()) return;
             const kind = dailyAlertKindAt(target);
             if (kind && nativeRuntime.isTornPDA) await cancelDailyTickReminder(kind);
             dailyAlertRuntime.liveTimerId = setTimeout(async () => {
-                await runDailyTickAlerts({ refresh: true });
+                if (documentIsHidden()) return;
+                await runDailyTickAlerts({ refresh: true, scheduled: true });
                 scheduleDailyTickAlerts();
             }, Math.max(0, target - Date.now() + 300));
         }, delay);
@@ -1107,7 +1500,32 @@
     function resetDailyTickAlerts() {
         scheduleDailyTickAlerts();
         void refreshDailyTickReminders();
-        void runDailyTickAlerts({ refresh: true });
+        if (!documentIsHidden()) void runDailyTickAlerts({ refresh: true, scheduled: true });
+    }
+
+    function nextDailyRankingRefreshTimestamp(timestamp = Date.now()) {
+        const today = dailyAlertPhaseTime(timestamp, DAILY_RANKINGS_REFRESH_MINUTE);
+        return today > timestamp + 250 ? today : dailyAlertPhaseTime(timestamp + DAY, DAILY_RANKINGS_REFRESH_MINUTE);
+    }
+
+    function resetDailyRankingRefresh() {
+        if (rankingsRefreshRuntime.timerId) clearTimeout(rankingsRefreshRuntime.timerId);
+        rankingsRefreshRuntime.timerId = null;
+        if (documentIsHidden()) {
+            debugLog("refresh:paused", { source: "daily rankings timer", reason: "document hidden" });
+            return;
+        }
+        const profile = state.data?.profile;
+        const cached = profile?.id ? state.rankings[String(profile.id)] : null;
+        if (isDailyRankingRefreshDue() && profile && !rankingRefreshedForDailyTick(cached)) {
+            void loadRankings({ force: true, scheduled: true });
+        }
+        const target = nextDailyRankingRefreshTimestamp();
+        rankingsRefreshRuntime.timerId = setTimeout(async () => {
+            if (documentIsHidden()) return;
+            await loadRankings({ force: true, scheduled: true });
+            resetDailyRankingRefresh();
+        }, Math.max(0, target - Date.now() + 250));
     }
 
     function companyHistory(companyId = state.data?.profile?.id) {
@@ -1291,8 +1709,17 @@
     }
 
     async function saveSettings(patch = {}) {
+        const previous = state.settings;
         state.settings = deepMergeSettings({ ...state.settings, ...patch });
-        await storeSet(STORE.settings, state.settings);
+        if (hasOwn(patch, "useLegacyGMStorage") && Boolean(previous.useLegacyGMStorage) !== Boolean(state.settings.useLegacyGMStorage)) {
+            const switched = await switchStoragePreference(state.settings.useLegacyGMStorage);
+            if (!switched) {
+                state.settings = previous;
+                await storeSet(STORE.settings, state.settings, { immediate: true });
+            }
+            return;
+        }
+        await storeSet(STORE.settings, state.settings, { immediate: true });
     }
 
     async function loadPersistedState() {
@@ -1331,9 +1758,13 @@
         }) : []]));
     }
 
-    async function refreshCore({ silent = false, suppressDailyAlerts = false } = {}) {
+    async function refreshCore({ silent = false, suppressDailyAlerts = false, scheduled = false } = {}) {
+        if (scheduled && documentIsHidden()) {
+            debugLog("refresh:paused", { source: "scheduled core refresh", reason: "document hidden" });
+            return false;
+        }
         if (state.loading) return;
-        if (!String(state.settings.tornKey || "").trim()) {
+        if (!hasTornApiKey()) {
             state.error = "Add a Torn API key in Settings before refreshing.";
             render();
             return;
@@ -1386,19 +1817,25 @@
         state.loading = false;
         state.status = `Updated ${timeAgo(state.data.fetchedAt)}.${messages.length ? ` ${messages.join(" ")}` : ""}`;
         render();
-        void loadRankings();
-        if (!suppressDailyAlerts) void runDailyTickAlerts({ refresh: false });
+        resetDailyRankingRefresh();
+        if (!suppressDailyAlerts) void runDailyTickAlerts({ refresh: false, scheduled });
+        if (!silent) void showFeedbackToast("Company data refreshed.", messages.length ? "warn" : "good", 5);
     }
 
-    async function loadRankings({ force = false } = {}) {
+    async function loadRankings({ force = false, scheduled = false } = {}) {
         if (state.rankingLoading || !state.data?.profile?.type?.id) return;
+        if (scheduled && documentIsHidden()) {
+            debugLog("refresh:paused", { source: "scheduled rankings refresh", reason: "document hidden" });
+            return;
+        }
         const profile = state.data.profile;
         const id = String(profile.id);
         const cached = state.rankings[id];
-        if (!force && cached?.fetchedAt && Date.now() - cached.fetchedAt < RANKING_TTL && Array.isArray(cached.companies)) {
-            state.status = `Rankings cached ${timeAgo(cached.fetchedAt)}.`;
+        if (rankingRefreshedForDailyTick(cached)) {
+            state.status = "Same-type rankings already refreshed for this Torn daily tick.";
             render();
-            return;
+            if (!scheduled) void showFeedbackToast("Rankings already refreshed for this Torn daily tick.", "warn", 5);
+            return { skipped: true };
         }
         state.rankingLoading = true;
         state.error = "";
@@ -1420,6 +1857,7 @@
                 if (index + 4 < offsets.length) await sleep(80);
             }
             const unique = [...new Map(companies.map((company) => [String(company.id), company])).values()];
+            if (!unique.length || !unique.some((company) => String(company?.id) === id)) throw new Error("Torn returned an incomplete same-type rankings result; it was not saved as today’s refresh.");
             const now = Date.now();
             const currentWeek = weekKey(now);
             const savedCohort = state.starCohorts[id];
@@ -1429,14 +1867,16 @@
             }
             const metrics = calculateRankingMetrics(unique, profile, state.starCohorts[id]?.counts);
             const prior = state.rankHistory[id];
-            state.rankings[id] = { fetchedAt: now, companies: unique, typeId, total: unique.length, previousRank: prior?.rank ?? null };
+            state.rankings[id] = { fetchedAt: now, companies: unique, typeId, total: unique.length, previousRank: prior?.rank ?? null, dailyRefreshDay: rankingRefreshDay(now), dailyRefreshAt: now };
             state.rankHistory[id] = { rank: metrics.rank, timestamp: now };
             await persistHistorySnapshot({ persist: false });
-            await storeSetMany({ [STORE.rankings]: state.rankings, [STORE.rankHistory]: state.rankHistory, [STORE.history]: state.history });
+            await storeSetMany({ [STORE.rankings]: state.rankings, [STORE.rankHistory]: state.rankHistory, [STORE.history]: state.history }, { immediate: true });
             state.status = `Ranked ${formatNumber(unique.length)} ${profile.type.name} companies.${prior?.rank && metrics.rank ? ` Rank ${prior.rank === metrics.rank ? "unchanged" : metrics.rank < prior.rank ? "improved" : "fell"}.` : ""}`;
+            if (!scheduled) void showFeedbackToast("Same-type rankings refreshed for this Torn daily tick.", "good", 5);
         } catch (error) {
             state.error = error?.message || "Unable to load company rankings.";
             state.status = "Rankings unavailable.";
+            if (!scheduled) void showFeedbackToast("Same-type rankings could not be refreshed.", "bad", 6);
         } finally {
             state.rankingLoading = false;
             render();
@@ -1610,7 +2050,7 @@
             width: Math.round(rect.width),
             height: Math.round(rect.height)
         };
-        await storeSet(STORE.layout, state.layout);
+        await storeSet(STORE.layout, state.layout, { immediate: true });
     }
 
     function mountShell() {
@@ -1710,10 +2150,14 @@
                 .ncc-pill.good { border-color:#2c806c; color:#7ce5bd; }
                 .ncc-pill.warn { border-color:#8b6d32; color:#ffd57d; }
                 .ncc-pill.bad { border-color:#85424d; color:#ffafb6; }
-                .ncc-kv { display:grid; grid-template-columns:minmax(115px,1fr) minmax(90px,1fr); gap:8px; padding:7px 0; border-bottom:1px solid #1d3549; font-size:11px; }
+                .ncc-kv { display:grid; grid-template-columns:minmax(115px,1fr) minmax(90px,1fr); gap:8px; min-width:0; padding:7px 0; border-bottom:1px solid #1d3549; font-size:11px; }
+                .ncc-kv span { min-width:0; }
                 .ncc-kv:last-child { border-bottom:0; }
                 .ncc-kv span:first-child { color:#90a7b9; }
                 .ncc-kv span:last-child { overflow:hidden; color:#e2eef4; font-weight:700; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
+                .ncc-news-list { min-width:0; }
+                .ncc-news-list .ncc-kv { grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr); }
+                .ncc-news-list .ncc-kv span:last-child { overflow:hidden; text-overflow:ellipsis; }
                 .ncc-bars { display:grid; gap:8px; }
                 .ncc-bar-row { display:grid; grid-template-columns:80px 1fr 35px; align-items:center; gap:7px; color:#a6bdca; font-size:10px; }
                 .ncc-bar { height:7px; overflow:hidden; border-radius:99px; background:#152e41; }
@@ -1761,6 +2205,22 @@
                 #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table td { display:grid; grid-template-columns:minmax(102px,.9fr) minmax(0,1.1fr); gap:8px; min-width:0; padding:5px 0; border-bottom:1px solid #1c354a; overflow-wrap:anywhere; text-align:right; white-space:normal; }
                 #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table td::before { align-self:start; color:#8ca4b7; content:attr(data-label); font-size:9px; font-weight:700; letter-spacing:.04em; text-align:left; text-transform:uppercase; }
                 #${ROOT_ID}[data-compact-layout="true"] .ncc-stack-table td:last-child { border-bottom:0; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list-wrap { overflow:visible; border:0; border-radius:0; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list, #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list tbody { display:block; width:100%; white-space:normal; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list thead { display:none; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list tbody tr { display:grid; grid-template-columns:34px minmax(0,1fr) auto; column-gap:7px; row-gap:3px; margin:0 0 6px; padding:7px 8px; border:1px solid #29465d; border-radius:8px; background:#0b1927; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list tbody tr:last-child { margin-bottom:0; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list td { display:none; min-width:0; padding:0; border:0; overflow:hidden; text-align:left; text-overflow:ellipsis; white-space:nowrap; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list td::before { display:none; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list td:nth-child(1) { display:block; color:#8ca4b7; font-weight:700; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list td:nth-child(2) { display:block; min-width:0; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list td:nth-child(3) { display:block; color:#a8c9d9; text-align:right; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-rank-list td:nth-child(5) { display:block; grid-column:2 / 4; color:#75dfbc; font-size:10px; font-weight:700; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-news-list .ncc-kv { grid-template-columns:minmax(0,1fr); gap:3px; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-news-list .ncc-kv span:last-child { display:-webkit-box; overflow:hidden; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow-wrap:anywhere; text-align:left; white-space:normal; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-trend-detail { grid-template-columns:minmax(0,1fr); }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-trend-detail .ncc-kv { grid-template-columns:minmax(0,1fr); gap:3px; }
+                #${ROOT_ID}[data-compact-layout="true"] .ncc-trend-detail .ncc-kv span:last-child { overflow-wrap:anywhere; text-align:left; white-space:normal; }
                 #${ROOT_ID}[data-runtime="mobile"] #ncc-panel { inset:max(4px, env(safe-area-inset-top)) 4px max(4px, env(safe-area-inset-bottom)) 4px !important; width:auto !important; height:auto !important; min-width:0; min-height:0; border-radius:11px; resize:none; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-resize-grip { display:none; }
                 #${ROOT_ID}[data-runtime="mobile"] #ncc-launcher { top:max(10px, env(safe-area-inset-top)); right:10px; }
@@ -1859,7 +2319,7 @@
                 ${metricCard("Health score", healthValue, healthSub, rankings ? "ncc-good" : "ncc-muted", rankings ? "show-health" : "load-rankings")}
                 ${metricCard("30-day income", formatMoney(monthlyIncome), monthly.useTrackedIncome ? `${monthly.coverage}/30 tracked days` : `${monthly.coverage}/30 tracked · forecast`, "ncc-good")}
                 ${metricCard("30-day Profit", formatMoney(monthlyProfit), monthlyProfit === null ? "Needs profit access" : monthly.useTrackedProfit ? `${monthly.profitCoverage}/30 tracked days` : `${monthly.profitCoverage}/30 tracked · forecast`, monthlyProfit !== null && monthlyProfit >= 0 ? "ncc-good" : monthlyProfit === null ? "ncc-muted" : "ncc-bad")}
-                ${metricCard("Workforce", `${formatNumber(profile.employees?.hired)} / ${formatNumber(profile.employees?.capacity)}`, averageEfficiency === null ? "Employee details unavailable" : `Avg effectiveness ${formatNumber(averageEfficiency, 1)}`)}
+                ${metricCard("Workforce", `${formatNumber(profile.employees?.hired)} / ${formatNumber(profile.employees?.capacity)}`, averageEfficiency === null ? "Employee details unavailable" : `Avg effectiveness ${formatNumber(averageEfficiency)}`)}
                 ${metricCard("Company cash", formatMoney(profile.funds), `Value ${formatMoney(profile.value)}`)}
             </div>`;
         const rankBody = rankings ? `
@@ -1879,8 +2339,9 @@
                 ${metricCard("Ad budget", formatMoney(profile.advertisement_budget), "Daily operating cost")}
                 ${metricCard("Applications", formatNumber(applications.length), applications.length ? "Pending applicants" : "No pending applications")}
             </div>`;
-        const recentNews = (state.data?.news || []).slice(0, 4).map((item) => `<div class="ncc-kv"><span>${escapeHtml(formatDateTime(asNumber(item.timestamp) * 1000))}</span><span title="${escapeHtml(item.text || "")}">${escapeHtml(String(item.text || "No details").replace(/<[^>]*>/g, ""))}</span></div>`).join("") || `<span class="ncc-muted">Funds news requires a Limited or higher key.</span>`;
-        return `${dataNotice()}${grid}${section("Income rank & star outlook", rankBody, `<button class="ncc-button ncc-primary" data-action="load-rankings" title="Loads every same-type company from Torn and recalculates rank, health score, and star-gap values" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading same-type rankings…" : rankings ? "Refresh all same-type rankings" : "Load all same-type rankings"}</button>`)}<div class="ncc-grid ncc-grid-2">${section("Company condition", conditionBody)}${section("Recent funds news", recentNews)}</div><p class="ncc-note">Income is supplied by Torn. Profit is calculated as: daily income − sold stock cost − ads − wages; weekly profit excludes stock cost because Torn exposes sold stock as a daily value. Monthly values become tracked totals after enough local daily snapshots.</p>`;
+        const newsRows = (state.data?.news || []).slice(0, 4).map((item) => `<div class="ncc-kv"><span>${escapeHtml(formatDateTime(asNumber(item.timestamp) * 1000))}</span><span title="${escapeHtml(item.text || "")}">${escapeHtml(String(item.text || "No details").replace(/<[^>]*>/g, ""))}</span></div>`).join("");
+        const recentNews = newsRows ? `<div class="ncc-news-list">${newsRows}</div>` : `<span class="ncc-muted">Funds news requires a Limited or higher key.</span>`;
+        return `${dataNotice()}${grid}${section("Income rank & star outlook", rankBody, `<button class="ncc-button ncc-primary" data-action="load-rankings" title="Checks whether same-type rankings have completed this Torn daily tick; only loads Torn pages when the current tick still needs a successful ranking pull" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading same-type rankings…" : rankings ? "Check daily rankings refresh" : "Load daily rankings"}</button>`)}<div class="ncc-grid ncc-grid-2">${section("Company condition", conditionBody)}${section("Recent funds news", recentNews)}</div><p class="ncc-note">Income is supplied by Torn. Profit is calculated as: daily income − sold stock cost − ads − wages; weekly profit excludes stock cost because Torn exposes sold stock as a daily value. Monthly values become tracked totals after enough local daily snapshots.</p>`;
     }
 
     function sortHeader(label, key, group) {
@@ -1903,7 +2364,7 @@
         const table = rows.length ? `<div class="${mode === "desktop" ? "ncc-team-list" : "ncc-team-grid"}">${rows.map((row) => {
             const misplaced = row.assignedPosition && row.currentPosition && row.assignedPosition !== row.currentPosition;
             const lastAction = row.lastAction ? timeAgo(row.lastAction * 1000) : "—";
-            return `<article class="ncc-team-card ${misplaced ? "ncc-misplaced" : ""}"><div class="ncc-team-top"><input type="checkbox" data-lock-employee="${row.id}" ${row.locked ? "checked" : ""} title="Lock: keep this employee in their current position during auto-assign"><b class="ncc-team-name" title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</b><span class="ncc-team-meta">${escapeHtml(row.status)} · ${formatOptionalNumber(row.days)}d</span></div><div class="ncc-team-line"><span class="ncc-team-current" title="Current position and preferred TornStats total effectiveness"><b>Current:</b> ${escapeHtml(row.currentPosition || "—")} · ${formatOptionalNumber(row.currentEfficiency, 1)}</span><span class="ncc-team-meta">${escapeHtml(row.currentEfficiencySource)}</span></div><div class="ncc-team-line"><select class="ncc-select ncc-team-select" data-assignment="${row.id}" title="Assigned position for this local projection" ${positions.length ? "" : "disabled"}>${selectOptions(row) || "<option>Load projections</option>"}</select><span class="ncc-team-assigned" title="Assigned efficiency"><b>Assigned:</b> ${formatOptionalNumber(row.assignedEfficiency, 1)} · ${formatSignedNumber(row.nonWorkingDelta)}</span></div><div class="ncc-team-line ncc-team-effects"><span class="${asNumber(row.addiction) < 0 ? "ncc-bad" : ""}">Addiction ${formatSignedNumber(row.addiction)}</span><span class="${asNumber(row.inactivity) < 0 ? "ncc-bad" : ""}">Inactivity ${formatSignedNumber(row.inactivity)}</span><span title="Best-fit projected position">Best ${escapeHtml(row.bestPosition || "—")} ${formatOptionalNumber(row.bestEfficiency, 1)}</span></div><div class="ncc-team-line ncc-team-effects"><span>Wage ${formatMoney(row.wage, true)} · Last action ${escapeHtml(lastAction)}</span></div></article>`;
+            return `<article class="ncc-team-card ${misplaced ? "ncc-misplaced" : ""}"><div class="ncc-team-top"><input type="checkbox" data-lock-employee="${row.id}" ${row.locked ? "checked" : ""} title="Lock: keep this employee in their current position during auto-assign"><b class="ncc-team-name" title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</b><span class="ncc-team-meta">${escapeHtml(row.status)} · ${formatOptionalNumber(row.days)}d</span></div><div class="ncc-team-line"><span class="ncc-team-current" title="Current position and preferred TornStats total effectiveness"><b>Current:</b> ${escapeHtml(row.currentPosition || "—")} · ${formatOptionalNumber(row.currentEfficiency)}</span><span class="ncc-team-meta">${escapeHtml(row.currentEfficiencySource)}</span></div><div class="ncc-team-line"><select class="ncc-select ncc-team-select" data-assignment="${row.id}" title="Assigned position for this local projection" ${positions.length ? "" : "disabled"}>${selectOptions(row) || "<option>Load projections</option>"}</select><span class="ncc-team-assigned" title="Assigned efficiency"><b>Assigned:</b> ${formatOptionalNumber(row.assignedEfficiency)} · ${formatSignedNumber(row.nonWorkingDelta)}</span></div><div class="ncc-team-line ncc-team-effects"><span class="${asNumber(row.addiction) < 0 ? "ncc-bad" : ""}">Addiction ${formatSignedNumber(row.addiction)}</span><span class="${asNumber(row.inactivity) < 0 ? "ncc-bad" : ""}">Inactivity ${formatSignedNumber(row.inactivity)}</span><span title="Best-fit projected position">Best ${escapeHtml(row.bestPosition || "—")} ${formatOptionalNumber(row.bestEfficiency)}</span></div><div class="ncc-team-line ncc-team-effects"><span>Wage ${formatMoney(row.wage, true)} · Last action ${escapeHtml(lastAction)}</span></div></article>`;
         }).join("")}</div>` : `<div class="ncc-notice">No employee rows match the filter, or employee details are not available for this API key.</div>`;
         const values = rows.map((row) => row.currentEfficiency).filter((value) => value !== null);
         const affected = rows.filter((row) => asNumber(row.addiction) < 0 || asNumber(row.inactivity) < 0).length;
@@ -1912,13 +2373,24 @@
             : tornPdaUserAgent(currentUserAgent())
                 ? "TornPDA (awaiting native confirmation) / compact cards"
                 : mode === "mobile" ? "Compact viewport cards" : "Desktop detailed list";
-        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-team-filter" type="search" value="${escapeHtml(state.teamFilter)}" placeholder="Filter employee or role"><button class="ncc-button ncc-primary" data-action="load-projections" title="Sends work-stat triplets to TornStats (only after consent) and refreshes each employee’s role efficiency options" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button><button class="ncc-button" data-tab="planner">Open capacity planner</button><span class="ncc-help">${runtimeLabel} · ${formatNumber(rows.length)} staff · ${formatNumber(state.data?.profile?.employees?.capacity)} capacity · Avg. ${values.length ? formatNumber(values.reduce((sum, value) => sum + asNumber(value), 0) / values.length, 1) : "—"} effectiveness · ${formatNumber(affected)} with penalties</span></div>${section("Employee efficiency", table)}<p class="ncc-note">Current Eff. and assigned efficiency use TornStats role base + Torn’s non-working-stat effect delta when available; Torn’s direct total is only the fallback before projections load.</p>`;
+        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-team-filter" type="search" value="${escapeHtml(state.teamFilter)}" placeholder="Filter employee or role"><button class="ncc-button ncc-primary" data-action="load-projections" title="Sends work-stat triplets to TornStats (only after consent) and refreshes each employee’s role efficiency options" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button><button class="ncc-button" data-tab="planner">Open capacity planner</button><span class="ncc-help">${runtimeLabel} · ${formatNumber(rows.length)} staff · ${formatNumber(state.data?.profile?.employees?.capacity)} capacity · Avg. ${values.length ? formatNumber(values.reduce((sum, value) => sum + asNumber(value), 0) / values.length) : "—"} effectiveness · ${formatNumber(affected)} with penalties</span></div>${section("Employee efficiency", table)}<p class="ncc-note">Current Eff. and assigned efficiency use TornStats role base + Torn’s non-working-stat effect delta when available; Torn’s direct total is only the fallback before projections load.</p>`;
     }
 
-    function formatSignedNumber(value, digits = 1) {
+    function formatSignedNumber(value, digits = 0) {
         const number = asFinite(value);
         if (number === null) return "—";
-        return `${number > 0 ? "+" : ""}${number.toFixed(digits)}`;
+        return `${number > 0 ? "+" : ""}${formatNumber(number, digits)}`;
+    }
+
+    function renderPositionConfigModal() {
+        const rows = employeeRows();
+        const positions = projectionPositions();
+        const settings = currentCompanySettings();
+        const assignments = calculateAssignmentPreview(rows, settings);
+        const orderedPositions = orderedPriorityPositions(positions, settings.priority);
+        const maxQty = Math.max(1, Math.floor(asNumber(state.data?.profile?.employees?.capacity, rows.length || 1)));
+        const capacityRows = positions.length ? `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr><th>Position</th><th>Max qty</th><th>Priority</th><th>Occupied</th></tr></thead><tbody>${orderedPositions.map((position, index) => `<tr>${stackCell("Position", `<b>${escapeHtml(position)}</b>`)}${stackCell("Max qty", `<select class="ncc-select" data-capacity="${escapeHtml(position)}"><option value="0" ${asNumber(settings.capacities[position]) === 0 ? "selected" : ""}>Uncapped</option>${Array.from({ length: maxQty }, (_, quantity) => quantity + 1).map((quantity) => `<option value="${quantity}" ${asNumber(settings.capacities[position]) === quantity ? "selected" : ""}>${quantity}</option>`).join("")}</select>`)}${stackCell("Priority", `<span class="ncc-priority-control"><button class="ncc-icon" data-action="priority-up" data-position="${escapeHtml(position)}" title="Move ${escapeHtml(position)} up" ${index === 0 ? "disabled" : ""}>↑</button><b>${index + 1}</b><button class="ncc-icon" data-action="priority-down" data-position="${escapeHtml(position)}" title="Move ${escapeHtml(position)} down" ${index === orderedPositions.length - 1 ? "disabled" : ""}>↓</button></span>`)}${stackCell("Occupied", formatNumber(assignments.occupied[position] || 0))}</tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice warn">Load per-employee TornStats projections first. Position names are discovered from the matching company-type response rather than hard-coded.</div>`;
+        return `<div class="ncc-modal-backdrop" data-action="close-modal"><section class="ncc-modal" role="dialog" aria-modal="true" aria-label="Position capacity and priority"><header class="ncc-modal-head"><h2>Position capacity & priority</h2><button class="ncc-icon" data-action="close-modal" title="Close position config">×</button></header><div class="ncc-modal-body">${capacityRows}<p class="ncc-note">Priority is saved immediately. The top role fills first; choose Uncapped or 1–${formatNumber(maxQty)} for Max Qty.</p><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-planner" ${positions.length ? "" : "disabled"}>Save position config</button><button class="ncc-button" data-action="close-modal">Close</button></div></div></section></div>`;
     }
 
     function renderPlanner() {
@@ -1926,9 +2398,6 @@
         const positions = projectionPositions();
         const settings = currentCompanySettings();
         const assignments = calculateAssignmentPreview(rows, settings);
-        const orderedPositions = orderedPriorityPositions(positions, settings.priority);
-        const maxQty = Math.max(1, Math.floor(asNumber(state.data?.profile?.employees?.capacity, rows.length || 1)));
-        const capacityRows = positions.length ? `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr><th>Position</th><th>Max qty</th><th>Priority</th><th>Occupied</th></tr></thead><tbody>${orderedPositions.map((position, index) => `<tr>${stackCell("Position", `<b>${escapeHtml(position)}</b>`)}${stackCell("Max qty", `<select class="ncc-select" data-capacity="${escapeHtml(position)}"><option value="0" ${asNumber(settings.capacities[position]) === 0 ? "selected" : ""}>Uncapped</option>${Array.from({ length: maxQty }, (_, quantity) => quantity + 1).map((quantity) => `<option value="${quantity}" ${asNumber(settings.capacities[position]) === quantity ? "selected" : ""}>${quantity}</option>`).join("")}</select>`)}${stackCell("Priority", `<span class="ncc-priority-control"><button class="ncc-icon" data-action="priority-up" data-position="${escapeHtml(position)}" title="Move ${escapeHtml(position)} up" ${index === 0 ? "disabled" : ""}>↑</button><b>${index + 1}</b><button class="ncc-icon" data-action="priority-down" data-position="${escapeHtml(position)}" title="Move ${escapeHtml(position)} down" ${index === orderedPositions.length - 1 ? "disabled" : ""}>↓</button></span>`)}${stackCell("Occupied", formatNumber(assignments.occupied[position] || 0))}</tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice warn">Load per-employee TornStats projections first. Position names are intentionally discovered from the matching company-type response rather than hard-coded.</div>`;
         const previewRows = sortRows(rows.map((row) => {
             const hasSavedAssignment = Object.prototype.hasOwnProperty.call(settings.assignments || {}, row.id);
             const assigned = hasSavedAssignment ? settings.assignments[row.id] : row.currentPosition;
@@ -1937,9 +2406,9 @@
             const change = projected === null || row.currentEfficiency === null ? null : projected - row.currentEfficiency;
             return { ...row, previewAssigned: assigned, previewEfficiency: projected, previewChange: change };
         }), { key: (row) => ({ name: row.name, current: row.currentPosition, assigned: row.previewAssigned, currentEfficiency: row.currentEfficiency, assignedEfficiency: row.previewEfficiency, change: row.previewChange, lock: row.locked ? 1 : 0 }[state.sort.planner.key]), dir: state.sort.planner.dir });
-        const rowsTable = previewRows.length ? `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr>${sortHeader("Employee", "name", "planner")}${sortHeader("Current", "current", "planner")}${sortHeader("Assigned", "assigned", "planner")}${sortHeader("Current eff.", "currentEfficiency", "planner")}${sortHeader("Assigned eff.", "assignedEfficiency", "planner")}${sortHeader("Change", "change", "planner")}${sortHeader("Lock", "lock", "planner")}</tr></thead><tbody>${previewRows.map((row) => `<tr class="${row.previewAssigned !== row.currentPosition ? "ncc-misplaced" : ""}">${stackCell("Employee", `<b>${escapeHtml(row.name)}</b>`)}${stackCell("Current", escapeHtml(row.currentPosition || "—"))}${stackCell("Assigned", escapeHtml(row.previewAssigned || "Unassigned"))}${stackCell("Current eff.", formatOptionalNumber(row.currentEfficiency, 1))}${stackCell("Assigned eff.", formatOptionalNumber(row.previewEfficiency, 1), row.previewChange !== null && row.previewChange > 0 ? "ncc-good" : row.previewChange !== null && row.previewChange < 0 ? "ncc-bad" : "")}${stackCell("Change", formatSignedNumber(row.previewChange))}${stackCell("Lock", row.locked ? "Locked" : "Flexible")}</tr>`).join("")}</tbody></table></div>` : "";
+        const rowsTable = previewRows.length ? `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr>${sortHeader("Employee", "name", "planner")}${sortHeader("Current", "current", "planner")}${sortHeader("Assigned", "assigned", "planner")}${sortHeader("Current eff.", "currentEfficiency", "planner")}${sortHeader("Assigned eff.", "assignedEfficiency", "planner")}${sortHeader("Change", "change", "planner")}${sortHeader("Lock", "lock", "planner")}</tr></thead><tbody>${previewRows.map((row) => `<tr class="${row.previewAssigned !== row.currentPosition ? "ncc-misplaced" : ""}">${stackCell("Employee", `<b>${escapeHtml(row.name)}</b>`)}${stackCell("Current", escapeHtml(row.currentPosition || "—"))}${stackCell("Assigned", escapeHtml(row.previewAssigned || "Unassigned"))}${stackCell("Current eff.", formatOptionalNumber(row.currentEfficiency))}${stackCell("Assigned eff.", formatOptionalNumber(row.previewEfficiency), row.previewChange !== null && row.previewChange > 0 ? "ncc-good" : row.previewChange !== null && row.previewChange < 0 ? "ncc-bad" : "")}${stackCell("Change", formatSignedNumber(row.previewChange))}${stackCell("Lock", row.locked ? "Locked" : "Flexible")}</tr>`).join("")}</tbody></table></div>` : "";
         const warnings = assignments.lockedOverages.map(([position, used]) => `${formatNumber(used)} locked employees exceed ${escapeHtml(position)}’s maximum.`).join(" ");
-        return `${dataNotice()}<div class="ncc-toolbar"><button class="ncc-button" data-action="save-planner" ${positions.length ? "" : "disabled"}>Save max quantities</button><button class="ncc-button ncc-primary" data-action="auto-assign" ${positions.length ? "" : "disabled"}>Auto-assign unlocked staff</button><button class="ncc-button" data-action="load-projections" title="Refreshes TornStats role-efficiency choices for every employee after consent" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating…" : "Refresh TornStats role projections"}</button><span class="ncc-help">Priority is saved immediately. The top role fills first; choose Uncapped or 1–${formatNumber(maxQty)} for Max Qty.</span></div>${section("Position capacity & priority", capacityRows)}${warnings ? `<div class="ncc-notice warn">${warnings}</div>` : ""}${section("Assignment preview", rowsTable)}<p class="ncc-note">Auto assignment keeps locked employees in their current seats, then greedily fills positions by priority with the highest remaining base efficiency while respecting configured role caps and total company capacity. It only saves a local plan.</p>`;
+        return `${dataNotice()}<div class="ncc-toolbar"><button class="ncc-button" data-action="open-position-config" ${positions.length ? "" : "disabled"}>Position config</button><button class="ncc-button ncc-primary" data-action="auto-assign" ${positions.length ? "" : "disabled"}>Auto-assign unlocked staff</button><button class="ncc-button" data-action="load-projections" title="Refreshes TornStats role-efficiency choices for every employee after consent" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating…" : "Refresh TornStats role projections"}</button><span class="ncc-help">Configure position maximums and priority in Position config. The top role fills first.</span></div>${warnings ? `<div class="ncc-notice warn">${warnings}</div>` : ""}${section("Assignment preview", rowsTable)}<p class="ncc-note">Auto assignment keeps locked employees in their current seats, then greedily fills positions by priority with the highest remaining base efficiency while respecting configured role caps and total company capacity. It only saves a local plan.</p>`;
     }
 
     function orderedPriorityPositions(positions, priority = []) {
@@ -1977,7 +2446,7 @@
         const profile = state.data?.profile || {};
         const metrics = rankingMetrics();
         if (!metrics) {
-            return `${dataNotice()}${section("Company rankings", `<div class="ncc-empty"><div><p>Load all ${escapeHtml(profile.type?.name || "same-type")} companies to see your weekly-income rank, health score, star thresholds, and nearest competitors.</p><button class="ncc-button ncc-primary" data-action="load-rankings" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading rankings…" : "Load company rankings"}</button></div></div>`)}<p class="ncc-note">Torn returns at most 100 companies per request. The companion follows pagination, deduplicates rows, and then sorts locally by weekly income.</p>`;
+            return `${dataNotice()}${section("Company rankings", `<div class="ncc-empty"><div><p>Load all ${escapeHtml(profile.type?.name || "same-type")} companies to see your weekly-income rank, health score, star thresholds, and nearest competitors.</p><button class="ncc-button ncc-primary" data-action="load-rankings" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading rankings…" : "Check daily rankings refresh"}</button></div></div>`)}<p class="ncc-note">Torn returns at most 100 companies per request. The companion follows pagination, deduplicates rows, and then sorts locally by weekly income. A successful Torn-day pull is not repeated by the manual control.</p>`;
         }
         const id = String(profile.id || "");
         const record = state.rankings[id];
@@ -1992,8 +2461,8 @@
         const slotSource = state.starCohorts?.[id]?.source === "post-reset" ? "Sunday post-reset slot snapshot" : "first observed this Torn week";
         const rankContext = companyRankSummary(metrics, profile).map((field) => `<div><b>${formatNumber(field.rank)} / ${formatNumber(field.total)}</b><small>${escapeHtml(field.label)}</small></div>`).join("");
         const strip = `<div class="ncc-summary-strip">${rankContext}<div><b>${formatMoney(incomeOf(profile))}</b><small>Weekly income</small></div><div><b class="${metrics.nextGap === 0 ? "ncc-good" : "ncc-warn"}">${formatMoney(metrics.nextGap)}</b><small>Gap to ${metrics.nextStar || "next"}★</small></div><div><b class="ncc-good">${formatMoney(metrics.previousBuffer)}</b><small>Buffer to ${metrics.previousStar || "previous"}★</small></div><div><b>${formatPercent(metrics.percentile, 1)}</b><small>Health score / income rank</small></div><div><b class="${change.startsWith("▲") ? "ncc-good" : change.startsWith("▼") ? "ncc-bad" : ""}">${escapeHtml(change.split(" ")[0])}</b><small>${escapeHtml(change)}</small></div></div>`;
-        const table = `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr>${sortHeader("Rank", "rank", "rankings")}${sortHeader("Company", "name", "rankings")}${sortHeader("Rating", "rating", "rankings")}${sortHeader("Daily income", "daily", "rankings")}${sortHeader("Weekly income", "weekly", "rankings")}</tr></thead><tbody>${shown.map((row) => `<tr class="${row.own ? "ncc-own-row" : ""}">${stackCell("Rank", formatNumber(row.rank))}${stackCell("Company", `<b>${escapeHtml(row.name || "Unknown")}</b>${row.own ? " <span class=\"ncc-pill good\">Your company</span>" : ""}`)}${stackCell("Rating", `${formatNumber(row.rating)}★`)}${stackCell("Daily income", formatMoney(row.daily, true))}${stackCell("Weekly income", formatMoney(row.weekly, true))}</tr>`).join("")}</tbody></table></div>`;
-        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-rankings-filter" type="search" value="${escapeHtml(state.rankingsFilter)}" placeholder="Filter company or rank"><button class="ncc-button ncc-primary" data-action="load-rankings" title="Reloads all same-type Torn companies, then recalculates rank and star gaps" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading same-type rankings…" : "Refresh all same-type rankings"}</button><button class="ncc-button" data-action="show-health">View rank neighbors</button><span class="ncc-help">Updated ${timeAgo(record.fetchedAt)} · ${formatNumber(metrics.total)} companies</span></div>${section("Your company", `${strip}<p class="ncc-note">Health score is your weekly-income percentile among the same company type. Star slots use a ${slotSource}; the income gaps are observed planning values, not official Torn thresholds.</p>`)}${section("Same-type companies", `${table}${rows.length > shown.length ? `<p class="ncc-note">Showing the first ${formatNumber(shown.length)} filtered companies.</p>` : ""}`)}`;
+        const table = `<div class="ncc-table-wrap ncc-rank-list-wrap"><table class="ncc-table ncc-rank-list"><thead><tr>${sortHeader("Rank", "rank", "rankings")}${sortHeader("Company", "name", "rankings")}${sortHeader("Rating", "rating", "rankings")}${sortHeader("Daily income", "daily", "rankings")}${sortHeader("Weekly income", "weekly", "rankings")}</tr></thead><tbody>${shown.map((row) => `<tr class="${row.own ? "ncc-own-row" : ""}">${stackCell("Rank", formatNumber(row.rank))}${stackCell("Company", `<b>${escapeHtml(row.name || "Unknown")}</b>${row.own ? " <span class=\"ncc-pill good\">Your company</span>" : ""}`)}${stackCell("Rating", `${formatNumber(row.rating)}★`)}${stackCell("Daily income", formatMoney(row.daily, true))}${stackCell("Weekly income", formatMoney(row.weekly, true))}</tr>`).join("")}</tbody></table></div>`;
+        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-rankings-filter" type="search" value="${escapeHtml(state.rankingsFilter)}" placeholder="Filter company or rank"><button class="ncc-button ncc-primary" data-action="load-rankings" title="Checks the current Torn-day success record before loading same-type rankings" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading same-type rankings…" : "Check daily rankings refresh"}</button><button class="ncc-button" data-action="show-health">View rank neighbors</button><span class="ncc-help">Updated ${timeAgo(record.fetchedAt)} · ${formatNumber(metrics.total)} companies</span></div>${section("Your company", `${strip}<p class="ncc-note">Health score is your weekly-income percentile among the same company type. Star slots use a ${slotSource}; the income gaps are observed planning values, not official Torn thresholds.</p>`)}${section("Same-type companies", `${table}${rows.length > shown.length ? `<p class="ncc-note">Showing the first ${formatNumber(shown.length)} filtered companies.</p>` : ""}`)}`;
     }
 
     function stockMetrics() {
@@ -2035,6 +2504,7 @@
     function renderStock() {
         const totals = stockMetrics();
         const previous = previousStockSnapshot();
+        const stockChart = trendSvg(companyHistory(), "stock");
         let rows = Array.isArray(state.data?.stock) ? [...state.data.stock] : [];
         const sort = state.sort.stock;
         rows = sortRows(rows, { key: (item) => sort.key === "margin" ? asNumber(item.sold_worth) - asNumber(item.cost) * asNumber(item.sold_amount) : sort.key === "difference" ? stockDifference(item, previous) : sort.key === "current_worth" ? currentStockWorth(item) : item[sort.key], dir: sort.dir });
@@ -2043,7 +2513,7 @@
             const difference = stockDifference(item, previous);
             return `<tr>${stackCell("Item", `<b>${escapeHtml(item.name || "Unknown")}</b><br><span class="ncc-muted">ID ${formatNumber(item.id)}</span>`)}${stackCell("In stock", formatNumber(item.in_stock))}${stackCell("Current stock worth", formatMoney(currentStockWorth(item)), "ncc-good")}${stackCell("Stock difference", difference === null ? "—" : formatSignedNumber(difference), difference === null ? "ncc-muted" : difference > 0 ? "ncc-good" : difference < 0 ? "ncc-bad" : "")}${stackCell("On order", formatNumber(item.on_order))}${stackCell("Cost", formatMoney(item.cost))}${stackCell("Price", formatMoney(item.price))}${stackCell("Sold", formatNumber(item.sold_amount))}${stackCell("Sold worth", formatMoney(item.sold_worth))}${stackCell("Gross margin", formatMoney(margin), margin >= 0 ? "ncc-good" : "ncc-bad")}</tr>`;
         }).join("")}</tbody></table></div>` : `<div class="ncc-notice warn">Stock details require a Limited or higher Torn API key.</div>`;
-        return `${dataNotice()}<div class="ncc-grid ncc-grid-3">${metricCard("Stock items", formatNumber(totals.inStock), `${formatNumber(totals.onOrder)} on order`)}${metricCard("Stock value", formatMoney(totals.saleValue), `${formatMoney(totals.costValue)} at cost`, "ncc-good")}${metricCard("Reported gross margin", formatMoney(totals.margin), `${formatMoney(totals.soldWorth)} sold worth`, totals.margin >= 0 ? "ncc-good" : "ncc-bad")}</div>${section("Stock & sales", table)}<p class="ncc-note">Stock difference is today’s in-stock amount minus the last local Torn reporting-day snapshot. It appears after a prior daily snapshot exists. Reported gross margin = sold worth − (cost × sold amount).</p>`;
+        return `${dataNotice()}${section("Stock trend", stockChart)}<div class="ncc-grid ncc-grid-3">${metricCard("Stock items", formatNumber(totals.inStock), `${formatNumber(totals.onOrder)} on order`)}${metricCard("Stock value", formatMoney(totals.saleValue), `${formatMoney(totals.costValue)} at cost`, "ncc-good")}${metricCard("Reported gross margin", formatMoney(totals.margin), `${formatMoney(totals.soldWorth)} sold worth`, totals.margin >= 0 ? "ncc-good" : "ncc-bad")}</div>${section("Stock & sales", table)}<p class="ncc-note">Stock difference is today’s in-stock amount minus the last local Torn reporting-day snapshot. It appears after a prior daily snapshot exists. Reported gross margin = sold worth − (cost × sold amount).</p>`;
     }
 
     function trendNumber(value) {
@@ -2105,7 +2575,7 @@
         const numeric = trendNumber(value);
         if (numeric === null) return "Unavailable";
         if (series.format === "money") return formatMoney(numeric, true);
-        if (series.format === "effectiveness") return formatNumber(numeric, 1);
+        if (series.format === "effectiveness") return formatNumber(numeric);
         if (series.format === "rank") return `#${formatNumber(numeric)}`;
         return formatNumber(numeric);
     }
@@ -2143,7 +2613,7 @@
         const rank = trendNumber(row.companyRank);
         const rankTotal = trendNumber(row.companyRankTotal);
         const dailyProfit = trendNumber(row.dailyProfit);
-        return `<div class="ncc-grid ncc-grid-3 ncc-trend-detail"><div class="ncc-kv"><span>Daily income</span><span>${trendNumber(row.dailyIncome) === null ? "—" : formatMoney(row.dailyIncome)}</span></div><div class="ncc-kv"><span>Stock</span><span>${stockValue === null ? "Unavailable" : `${formatMoney(stockValue, true)} · ${stockQuantity === null ? "—" : formatNumber(stockQuantity)} qty`}</span></div><div class="ncc-kv"><span>Avg employee eff.</span><span>${averageEfficiency === null ? "—" : formatNumber(averageEfficiency, 1)}</span></div><div class="ncc-kv"><span>Star level</span><span>${trendNumber(row.rating) === null ? "—" : `${formatNumber(row.rating)}★`}</span></div><div class="ncc-kv"><span>Daily profit</span><span class="${dailyProfit === null ? "ncc-muted" : dailyProfit >= 0 ? "ncc-good" : "ncc-bad"}">${dailyProfit === null ? "—" : formatMoney(dailyProfit)}</span></div><div class="ncc-kv"><span>Company rank</span><span>${rank === null ? "Unavailable" : `${formatNumber(rank)}${rankTotal === null ? "" : ` / ${formatNumber(rankTotal)}`}`}</span></div><div class="ncc-kv"><span>Performance vs previous day</span><span class="${performance.tone}">${performance.label}</span></div></div><p class="ncc-note">${escapeHtml(formatDateTime(row.period))} · ${escapeHtml(performance.detail)}. Hover any chart point for daily values, or select one to compare that day with its prior local snapshot.</p>`;
+        return `<div class="ncc-grid ncc-grid-3 ncc-trend-detail"><div class="ncc-kv"><span>Daily income</span><span>${trendNumber(row.dailyIncome) === null ? "—" : formatMoney(row.dailyIncome)}</span></div><div class="ncc-kv"><span>Stock</span><span>${stockValue === null ? "Unavailable" : `${formatMoney(stockValue, true)} · ${stockQuantity === null ? "—" : formatNumber(stockQuantity)} qty`}</span></div><div class="ncc-kv"><span>Avg employee eff.</span><span>${averageEfficiency === null ? "—" : formatNumber(averageEfficiency)}</span></div><div class="ncc-kv"><span>Star level</span><span>${trendNumber(row.rating) === null ? "—" : `${formatNumber(row.rating)}★`}</span></div><div class="ncc-kv"><span>Daily profit</span><span class="${dailyProfit === null ? "ncc-muted" : dailyProfit >= 0 ? "ncc-good" : "ncc-bad"}">${dailyProfit === null ? "—" : formatMoney(dailyProfit)}</span></div><div class="ncc-kv"><span>Company rank</span><span>${rank === null ? "Unavailable" : `${formatNumber(rank)}${rankTotal === null ? "" : ` / ${formatNumber(rankTotal)}`}`}</span></div><div class="ncc-kv"><span>Performance vs previous day</span><span class="${performance.tone}">${performance.label}</span></div></div><p class="ncc-note">${escapeHtml(formatDateTime(row.period))} · ${escapeHtml(performance.detail)}. Hover any chart point for daily values, or select one to compare that day with its prior local snapshot.</p>`;
     }
 
     function trendLineSegments(rows, key, x, y) {
@@ -2216,8 +2686,9 @@
     function renderTrends() {
         const history = companyHistory();
         const latest = [...history].reverse().slice(0, 30);
-        const chart = trendChartDefinition(state.selectedTrendChart);
-        const chartOptions = ["income-profit", "stock", "effectiveness", "ranking"].map((type) => {
+        const trendTypes = ["income-profit", "effectiveness", "ranking"];
+        const chart = trendChartDefinition(trendTypes.includes(state.selectedTrendChart) ? state.selectedTrendChart : "income-profit");
+        const chartOptions = trendTypes.map((type) => {
             const item = trendChartDefinition(type);
             return `<option value="${item.id}" ${item.id === chart.id ? "selected" : ""}>${escapeHtml(item.label)}</option>`;
         }).join("");
@@ -2225,16 +2696,32 @@
         return `${dataNotice()}<div class="ncc-toolbar"><label class="ncc-inline"><span class="ncc-label">Chart view</span><select id="ncc-trend-chart" class="ncc-select" title="Choose the local daily metric to chart">${chartOptions}</select></label><button class="ncc-button" data-action="export-history" ${history.length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="reset-history" ${history.length ? "" : "disabled"}>Clear local history</button><span class="ncc-help">${formatNumber(history.length)} retained daily snapshots · 92-day retention</span></div>${section(`${chart.label} trend`, trendSvg(history, chart.id))}${section("Local company history", table)}<p class="ncc-note">History stays in your userscript storage and is never uploaded by this companion. Income comes from daily Torn snapshots; Profit is calculated locally from the available daily inputs. Stock worth is recorded only when stock details are available; average employee effectiveness is the displayed current-effectiveness average; company rank is recorded only after same-type rankings load. Older snapshots can lack these newer metrics and remain unavailable rather than being inferred.</p>`;
     }
 
+    function renderBackupRestoreModal() {
+        const pending = state.pendingRestore;
+        if (!pending?.backup) return "";
+        const backup = pending.backup;
+        const keyChoice = backup.includesApiKeys
+            ? `<label class="ncc-check"><input id="ncc-restore-backup-keys" type="checkbox"><span><b>Restore API keys from this backup</b><br>Unchecked preserves the API keys already stored on this device. Key values are never shown.</span></label>`
+            : `<div class="ncc-notice">This backup does not contain API keys. Existing local API keys will be preserved.</div>`;
+        return `<div class="ncc-modal-backdrop" data-action="close-modal"><section class="ncc-modal" role="dialog" aria-modal="true" aria-label="Restore Company backup"><header class="ncc-modal-head"><h2>Restore local Company backup</h2><button class="ncc-icon" data-action="close-modal" title="Cancel backup restore">×</button></header><div class="ncc-modal-body"><div class="ncc-grid ncc-grid-2"><div class="ncc-kv"><span>Backup file</span><span title="${escapeHtml(pending.fileName)}">${escapeHtml(pending.fileName)}</span></div><div class="ncc-kv"><span>Created</span><span>${escapeHtml(formatDateTime(Date.parse(backup.createdAt)))}</span></div><div class="ncc-kv"><span>Schema</span><span>v${formatNumber(backup.schemaVersion)} · App ${escapeHtml(backup.appVersion)}</span></div><div class="ncc-kv"><span>API keys included</span><span>${backup.includesApiKeys ? "Yes — restore remains opt-in" : "No"}</span></div></div><p class="ncc-note">This replaces this companion’s local snapshots, history, rankings, projections, planner, layout, alert state, and settings. It cannot alter Torn or TornStats data. The currently selected storage method stays in use.</p>${keyChoice}<label class="ncc-check" style="margin-top:10px"><input id="ncc-confirm-backup-restore" type="checkbox"><span><b>I understand this replaces my current local Company companion data.</b><br>The backup was validated before this confirmation step.</span></label><div class="ncc-inline" style="margin-top:12px"><button class="ncc-button ncc-danger" data-action="confirm-backup-restore">Restore and replace local data</button><button class="ncc-button" data-action="close-modal">Cancel</button></div></div></section></div>`;
+    }
+
     function renderSettings() {
         const settings = state.settings;
-        return `${dataNotice()}${section("API keys", `<div class="ncc-grid ncc-grid-2"><label><span class="ncc-label">Torn API key</span><input id="ncc-torn-key" class="ncc-input" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.tornKey)}" placeholder="16-character Torn API key" style="width:100%;margin-top:6px"></label><label><span class="ncc-label">TornStats API key</span><input id="ncc-tornstats-key" class="ncc-input" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.tornStatsKey)}" placeholder="Optional; required for projections" style="width:100%;margin-top:6px"></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save settings only</button><button class="ncc-button" data-action="verify-refresh" title="Saves keys, then reloads Torn profile, employees, stock, funds news, and applications">Save keys & refresh Torn data</button></div><p class="ncc-note">Keys are stored only in your local userscript manager storage. They are not included in this repository, exports, or status messages.</p>`)}${section("TornStats projection consent", `<label class="ncc-check"><input id="ncc-projection-consent" type="checkbox" ${settings.projectionConsent ? "checked" : ""}><span><b>Allow per-employee efficiency projections.</b><br>TornStats will receive each employee’s Manual labor, Intelligence, and Endurance values with your TornStats key to calculate role efficiency. Enable this only if you are comfortable sending those work-stat triplets to TornStats.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button" data-action="save-settings">Save consent choice</button><button class="ncc-button ncc-primary" data-action="load-projections" title="Calls TornStats for each employee to rebuild selectable role-efficiency projections" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button></div>`)}${section("Calculation & refresh", `<div class="ncc-grid ncc-grid-2"><label class="ncc-check"><input id="ncc-stock-cost" type="checkbox" ${settings.includeStockCost ? "checked" : ""}><span><b>Include sold stock cost in daily net.</b><br>Daily net subtracts cost × sold amount; weekly net follows Torn Company Assistant’s wage/advertising formula because stock is reported as a daily value.</span></label><label><span class="ncc-label">Automatic core refresh</span><div class="ncc-inline" style="margin-top:6px"><input id="ncc-refresh-minutes" class="ncc-input" type="number" min="2" max="120" value="${clamp(asNumber(settings.autoRefreshMinutes, 10), 2, 120)}" style="width:85px"><span class="ncc-help">minutes while Torn is open</span></div></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save preferences only</button><button class="ncc-button" data-action="reset-layout">Reset panel position</button></div>`)}${section("Local data", `<div class="ncc-inline"><button class="ncc-button" data-action="export-history" ${companyHistory().length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="clear-local-data">Clear companion data</button></div><p class="ncc-note">Clearing companion data deletes local cache, rankings, efficiency projections, history, assignments, and saved keys from this userscript. It cannot change Torn or TornStats data.</p>`)}<p class="ncc-note">Naughty Company Companion ${VERSION} · TornPDA/Tampermonkey compatible.</p>`;
+        const viewport = visibleViewport();
+        const panelRect = panel()?.getBoundingClientRect();
+        const runtime = nativeRuntime.isTornPDA ? "TornPDA (native confirmed)" : tornPdaUserAgent(currentUserAgent()) ? "TornPDA (native confirmation pending)" : "Desktop / Tampermonkey";
+        const screenSize = `${formatNumber(viewport.width)} × ${formatNumber(viewport.height)} visible${panelRect ? ` · panel ${formatNumber(Math.round(panelRect.width))} × ${formatNumber(Math.round(panelRect.height))}` : ""}`;
+        const runtimeStorage = section("Runtime & storage", `<div class="ncc-kv"><span>Runtime</span><span>${escapeHtml(runtime)} · ${escapeHtml(state.runtimeMode)}</span></div><div class="ncc-kv"><span>Current screen size</span><span>${escapeHtml(screenSize)}</span></div><div class="ncc-kv"><span>Storage method</span><span>${escapeHtml(storageMethodLabel())}</span></div><label class="ncc-check" style="margin-top:10px"><input id="ncc-use-legacy-gm-storage" type="checkbox" ${settings.useLegacyGMStorage ? "checked" : ""}><span><b>Use legacy GM storage</b><br>Unchecked keeps TornPDA <code>PDA_storage</code> primary when available, with compatible GM/local fallback. Selecting this safely migrates current companion data to legacy GM storage and uses it first.</span></label>`);
+        const backupRestore = section("Backup & restore", `<label class="ncc-check"><input id="ncc-backup-include-keys" type="checkbox"><span><b>Include API keys in this backup</b><br>Unchecked by default. Key values are never displayed, logged, or included unless you select this box for this one download.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="download-company-backup">Download local Company backup</button><button class="ncc-button" data-action="choose-company-backup">Choose backup JSON to restore</button><input id="ncc-company-backup-file" type="file" accept="application/json,.json" style="display:none"></div><p class="ncc-note">Backups include local snapshots, history, rankings, projections, planner, layout, settings, and alert state. Restore validates the versioned Company-only file before asking for confirmation. API keys stay out unless you opt in both when creating and when restoring a key-containing backup.</p>`);
+        return `${dataNotice()}${section("API keys", `<div class="ncc-grid ncc-grid-2"><label><span class="ncc-label">Torn API key</span><input id="ncc-torn-key" class="ncc-input" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.tornKey)}" placeholder="16-character Torn API key" style="width:100%;margin-top:6px"></label><label><span class="ncc-label">TornStats API key</span><input id="ncc-tornstats-key" class="ncc-input" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.tornStatsKey)}" placeholder="Optional; required for projections" style="width:100%;margin-top:6px"></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save settings only</button><button class="ncc-button" data-action="verify-refresh" title="Saves keys, then reloads Torn profile, employees, stock, funds news, and applications">Save keys & refresh Torn data</button></div><p class="ncc-note">Keys are stored only in your local userscript manager storage. They are not included in this repository, exports, or status messages.</p>`)}${section("TornStats projection consent", `<label class="ncc-check"><input id="ncc-projection-consent" type="checkbox" ${settings.projectionConsent ? "checked" : ""}><span><b>Allow per-employee efficiency projections.</b><br>TornStats will receive each employee’s Manual labor, Intelligence, and Endurance values with your TornStats key to calculate role efficiency. Enable this only if you are comfortable sending those work-stat triplets to TornStats.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button" data-action="save-settings">Save consent choice</button><button class="ncc-button ncc-primary" data-action="load-projections" title="Calls TornStats for each employee to rebuild selectable role-efficiency projections" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button></div>`)}${section("Calculation & refresh", `<div class="ncc-grid ncc-grid-2"><label class="ncc-check"><input id="ncc-stock-cost" type="checkbox" ${settings.includeStockCost ? "checked" : ""}><span><b>Include sold stock cost in daily net.</b><br>Daily net subtracts cost × sold amount; weekly net follows Torn Company Assistant’s wage/advertising formula because stock is reported as a daily value.</span></label><label><span class="ncc-label">Automatic core refresh</span><div class="ncc-inline" style="margin-top:6px"><input id="ncc-refresh-minutes" class="ncc-input" type="number" min="2" max="120" value="${clamp(asNumber(settings.autoRefreshMinutes, 10), 2, 120)}" style="width:85px"><span class="ncc-help">minutes while Torn is open</span></div></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save preferences only</button><button class="ncc-button" data-action="reset-layout">Reset panel position</button></div>`)}${runtimeStorage}${backupRestore}${section("Local data", `<div class="ncc-inline"><button class="ncc-button" data-action="export-history" ${companyHistory().length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="clear-local-data">Clear companion data</button></div><p class="ncc-note">Clearing companion data deletes local cache, rankings, efficiency projections, history, assignments, and saved keys from this userscript. It cannot change Torn or TornStats data.</p>`)}<p class="ncc-note">Naughty Company Companion ${VERSION} · TornPDA/Tampermonkey compatible.</p>`;
     }
 
     function renderHealthModal() {
         const metrics = rankingMetrics();
         if (!metrics) return "";
         const rows = metrics.neighbors.map((company) => `<tr class="${company.rank === metrics.rank ? "ncc-own-row" : ""}">${stackCell("Rank", formatNumber(company.rank))}${stackCell("Company", `<b>${escapeHtml(company.name || "Unknown")}</b>`)}${stackCell("Rating", `${formatNumber(company.rating)}★`)}${stackCell("Daily income", formatMoney(incomeOf(company, "daily"), true))}${stackCell("Weekly income", formatMoney(incomeOf(company), true))}</tr>`).join("");
-        return `<div class="ncc-modal-backdrop" data-action="close-modal"><section class="ncc-modal" role="dialog" aria-modal="true" aria-label="Health score neighbors"><header class="ncc-modal-head"><h2>Health score · income rank</h2><button class="ncc-icon" data-action="close-modal">×</button></header><div class="ncc-modal-body"><div class="ncc-grid ncc-grid-3">${metricCard("Health score", formatPercent(metrics.percentile, 1), "Weekly-income percentile", "ncc-good")}${metricCard("Your rank", `${formatNumber(metrics.rank)} / ${formatNumber(metrics.total)}`, "Same company type")}${metricCard("Weekly income", formatMoney(incomeOf(state.data?.profile)), "Current Torn value")}</div><p class="ncc-note">Health score is not a Torn API field or a hidden company-quality formula. It is the companion’s transparent weekly-income percentile: (companies − rank + 1) / companies.</p><div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr><th>Rank</th><th>Company</th><th>Rating</th><th>Daily income</th><th>Weekly income</th></tr></thead><tbody>${rows}</tbody></table></div></div></section></div>`;
+        return `<div class="ncc-modal-backdrop" data-action="close-modal"><section class="ncc-modal" role="dialog" aria-modal="true" aria-label="Health score neighbors"><header class="ncc-modal-head"><h2>Health score · income rank</h2><button class="ncc-icon" data-action="close-modal">×</button></header><div class="ncc-modal-body"><div class="ncc-grid ncc-grid-3">${metricCard("Health score", formatPercent(metrics.percentile, 1), "Weekly-income percentile", "ncc-good")}${metricCard("Your rank", `${formatNumber(metrics.rank)} / ${formatNumber(metrics.total)}`, "Same company type")}${metricCard("Weekly income", formatMoney(incomeOf(state.data?.profile)), "Current Torn value")}</div><p class="ncc-note">Health score is not a Torn API field or a hidden company-quality formula. It is the companion’s transparent weekly-income percentile: (companies − rank + 1) / companies.</p><div class="ncc-table-wrap ncc-rank-list-wrap"><table class="ncc-table ncc-rank-list"><thead><tr><th>Rank</th><th>Company</th><th>Rating</th><th>Daily income</th><th>Weekly income</th></tr></thead><tbody>${rows}</tbody></table></div></div></section></div>`;
     }
 
     function renderMain() {
@@ -2263,13 +2750,15 @@
         const contentEl = content();
         contentEl.innerHTML = renderMain();
         if (state.modal === "health") contentEl.insertAdjacentHTML("beforeend", renderHealthModal());
+        if (state.modal === "position-config") contentEl.insertAdjacentHTML("beforeend", renderPositionConfigModal());
+        if (state.modal === "restore-backup") contentEl.insertAdjacentHTML("beforeend", renderBackupRestoreModal());
         bindContentEvents();
         applyLayout();
     }
 
     async function toggleMinimized(minimized) {
         state.layout.minimized = minimized;
-        await storeSet(STORE.layout, state.layout);
+        await storeSet(STORE.layout, state.layout, { immediate: true });
         applyLayout();
     }
 
@@ -2310,6 +2799,7 @@
         state.settings.positionCapacities[settings.id] = capacities;
         await saveSettings({ positionCapacities: state.settings.positionCapacities, positionPriority: state.settings.positionPriority });
         state.status = "Position max quantities saved.";
+        state.modal = null;
         render();
     }
 
@@ -2331,19 +2821,155 @@
         const tornStatsKey = document.getElementById("ncc-tornstats-key");
         const consent = document.getElementById("ncc-projection-consent");
         const stockCost = document.getElementById("ncc-stock-cost");
+        const useLegacyGMStorage = document.getElementById("ncc-use-legacy-gm-storage");
         const refreshMinutes = document.getElementById("ncc-refresh-minutes");
         await saveSettings({
             tornKey: tornKey ? tornKey.value.trim() : state.settings.tornKey,
             tornStatsKey: tornStatsKey ? tornStatsKey.value.trim() : state.settings.tornStatsKey,
             projectionConsent: consent ? consent.checked : state.settings.projectionConsent,
             includeStockCost: stockCost ? stockCost.checked : state.settings.includeStockCost,
+            useLegacyGMStorage: useLegacyGMStorage ? useLegacyGMStorage.checked : state.settings.useLegacyGMStorage,
             autoRefreshMinutes: refreshMinutes ? clamp(asNumber(refreshMinutes.value, 10), 2, 120) : state.settings.autoRefreshMinutes
         });
         resetAutoRefresh();
         resetDailyTickAlerts();
+        resetDailyRankingRefresh();
         state.error = "";
         state.status = "Settings saved locally.";
         render();
+        void showFeedbackToast("Company settings saved.", "good", 4);
+    }
+
+    function currentCompanyBackupStores() {
+        return {
+            [STORE.settings]: state.settings,
+            [STORE.cache]: state.cache,
+            [STORE.history]: state.history,
+            [STORE.rankings]: state.rankings,
+            [STORE.projections]: state.projections,
+            [STORE.rankHistory]: state.rankHistory,
+            [STORE.starCohorts]: state.starCohorts,
+            [STORE.layout]: state.layout,
+            [STORE.dailyAlerts]: state.dailyAlerts,
+            [STORE.dailyReminders]: state.dailyReminders
+        };
+    }
+
+    function backupFileName(timestamp = Date.now()) {
+        return `naughty-company-backup-${new Date(timestamp).toISOString().replace(/[:.]/g, "-")}.json`;
+    }
+
+    function downloadLocalTextFile(text, fileName, type) {
+        const blob = new Blob([text], { type });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = fileName;
+        document.body.append(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+    }
+
+    async function downloadCompanyBackup() {
+        const includeKeys = document.getElementById("ncc-backup-include-keys")?.checked === true;
+        const backup = createCompanyBackupDocument(currentCompanyBackupStores(), { includeApiKeys: includeKeys });
+        downloadLocalTextFile(JSON.stringify(backup, null, 2), backupFileName(), "application/json;charset=utf-8");
+        state.status = includeKeys ? "Local Company backup downloaded with opted-in API keys." : "Local Company backup downloaded without API keys.";
+        render();
+        void showFeedbackToast(includeKeys ? "Company backup downloaded with opted-in API keys." : "Company backup downloaded without API keys.", "good", 6);
+    }
+
+    function readBackupFileText(file) {
+        if (typeof file?.text === "function") return file.text();
+        return new Promise((resolve, reject) => {
+            if (typeof FileReader === "undefined") {
+                reject(new Error("This runtime cannot read local backup files."));
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(new Error("Unable to read the selected backup file."));
+            reader.readAsText(file);
+        });
+    }
+
+    async function stageCompanyBackupRestore(file) {
+        if (!file) return;
+        if (asNumber(file.size) > BACKUP_MAX_BYTES) {
+            state.error = `Backup files must be ${formatNumber(BACKUP_MAX_BYTES / (1024 * 1024))} MB or smaller.`;
+            render();
+            return;
+        }
+        try {
+            const raw = JSON.parse(await readBackupFileText(file));
+            const backup = validateCompanyBackupDocument(raw);
+            state.pendingRestore = { backup, fileName: String(file.name || "backup.json").slice(0, 160) };
+            state.modal = "restore-backup";
+            state.error = "";
+            state.status = "Backup validated. Review and confirm the restore.";
+            render();
+        } catch (error) {
+            state.pendingRestore = null;
+            state.error = error?.message || "Unable to read this backup file.";
+            state.status = "Backup was not restored.";
+            render();
+            void showFeedbackToast("Company backup could not be validated.", "bad", 6);
+        }
+    }
+
+    function applyRestoredCompanyState(stores) {
+        state.settings = deepMergeSettings(stores[STORE.settings]);
+        state.layout = { ...DEFAULT_LAYOUT, ...(isObject(stores[STORE.layout]) ? stores[STORE.layout] : {}) };
+        state.cache = isObject(stores[STORE.cache]) ? stores[STORE.cache] : null;
+        state.history = normalizeHistory(stores[STORE.history]);
+        state.rankings = isObject(stores[STORE.rankings]) ? stores[STORE.rankings] : {};
+        state.projections = isObject(stores[STORE.projections]) ? stores[STORE.projections] : {};
+        state.rankHistory = isObject(stores[STORE.rankHistory]) ? stores[STORE.rankHistory] : {};
+        state.starCohorts = isObject(stores[STORE.starCohorts]) ? stores[STORE.starCohorts] : {};
+        state.dailyAlerts = isObject(stores[STORE.dailyAlerts]) ? stores[STORE.dailyAlerts] : {};
+        state.dailyReminders = isObject(stores[STORE.dailyReminders]) ? stores[STORE.dailyReminders] : {};
+        state.selectedTab = state.settings.activeTab || "overview";
+        state.data = state.cache?.profile?.id ? state.cache : null;
+    }
+
+    async function restoreCompanyBackup(backup, { restoreApiKeys = false } = {}) {
+        const stores = materializeCompanyBackupStores(backup, { currentSettings: state.settings, restoreApiKeys });
+        await flushStorageWrites();
+        await storeSetMany(stores, { immediate: true });
+        applyRestoredCompanyState(stores);
+        state.pendingRestore = null;
+        state.modal = null;
+        state.error = "";
+        state.status = restoreApiKeys && backup.includesApiKeys
+            ? "Local Company backup restored, including opted-in API keys."
+            : "Local Company backup restored; existing API keys were preserved.";
+        resetAutoRefresh();
+        resetDailyTickAlerts();
+        resetDailyRankingRefresh();
+        render();
+        void showFeedbackToast(restoreApiKeys && backup.includesApiKeys ? "Company backup restored with opted-in API keys." : "Company backup restored.", "good", 6);
+    }
+
+    async function confirmCompanyBackupRestore() {
+        const pending = state.pendingRestore;
+        if (!pending?.backup) return;
+        const confirmed = document.getElementById("ncc-confirm-backup-restore")?.checked === true;
+        if (!confirmed) {
+            state.error = "Confirm that the restore will replace current local Company data before continuing.";
+            render();
+            return;
+        }
+        const restoreApiKeys = pending.backup.includesApiKeys && document.getElementById("ncc-restore-backup-keys")?.checked === true;
+        if (!window.confirm("Replace this companion’s local Company data with the validated backup? Existing local snapshots, plans, rankings, and history will be replaced.")) return;
+        try {
+            await restoreCompanyBackup(pending.backup, { restoreApiKeys });
+        } catch (error) {
+            state.error = error?.message || "Unable to restore this backup.";
+            state.status = "Backup restore failed.";
+            render();
+            void showFeedbackToast("Company backup restore failed.", "bad", 6);
+        }
     }
 
     async function exportHistory() {
@@ -2399,7 +3025,7 @@
 
     function resetPanelLayout() {
         state.layout = { ...DEFAULT_LAYOUT };
-        void storeSet(STORE.layout, state.layout);
+        void storeSet(STORE.layout, state.layout, { immediate: true });
         applyLayout();
         state.status = "Panel layout reset.";
         render();
@@ -2444,6 +3070,12 @@
             state.selectedTrendChart = trendChartDefinition(trendChart.value).id;
             render();
         };
+        const backupFileInput = document.getElementById("ncc-company-backup-file");
+        if (backupFileInput) backupFileInput.onchange = () => {
+            const file = backupFileInput.files?.[0];
+            backupFileInput.value = "";
+            if (file) void stageCompanyBackupRestore(file);
+        };
         root.querySelectorAll("[data-action]").forEach((element) => {
             element.onclick = async (event) => {
                 const action = element.getAttribute("data-action");
@@ -2454,14 +3086,18 @@
                     case "load-rankings": await loadRankings({ force: true }); break;
                     case "load-projections": await loadProjections(); break;
                     case "show-health": state.modal = "health"; render(); break;
+                    case "open-position-config": state.modal = "position-config"; render(); break;
                     case "select-trend": state.selectedTrendPeriod = asNumber(element.getAttribute("data-period")); render(); break;
-                    case "close-modal": state.modal = null; render(); break;
+                    case "close-modal": state.modal = null; state.pendingRestore = null; render(); break;
                     case "save-planner": await savePlannerSettings(); break;
                     case "priority-up": await movePlannerPriority(element.getAttribute("data-position"), -1); break;
                     case "priority-down": await movePlannerPriority(element.getAttribute("data-position"), 1); break;
                     case "auto-assign": await autoAssign(); break;
                     case "save-settings": await saveSettingsFromForm(); break;
                     case "verify-refresh": await saveSettingsFromForm(); await refreshCore(); break;
+                    case "download-company-backup": await downloadCompanyBackup(); break;
+                    case "choose-company-backup": document.getElementById("ncc-company-backup-file")?.click(); break;
+                    case "confirm-backup-restore": await confirmCompanyBackupRestore(); break;
                     case "export-history": await exportHistory(); break;
                     case "reset-history": await resetHistory(); break;
                     case "clear-local-data": await clearLocalData(); break;
@@ -2551,9 +3187,9 @@
     function resetAutoRefresh() {
         if (state.autoRefreshId) clearInterval(state.autoRefreshId);
         state.autoRefreshId = null;
-        if (!String(state.settings.tornKey || "").trim()) return;
+        if (!hasTornApiKey() || documentIsHidden()) return;
         const minutes = clamp(asNumber(state.settings.autoRefreshMinutes, 10), 2, 120);
-        state.autoRefreshId = setInterval(() => refreshCore({ silent: true }), minutes * 60 * 1000);
+        state.autoRefreshId = setInterval(() => { void refreshCore({ silent: true, scheduled: true }); }, minutes * 60 * 1000);
     }
 
     async function boot() {
@@ -2564,14 +3200,16 @@
             runtimeMode: currentRuntimeMode(),
             confirmedTornPDA: nativeRuntime.isTornPDA,
             storageMode: storage.mode,
-            tornKeyConfigured: Boolean(String(state.settings.tornKey || "").trim())
+            tornKeyConfigured: hasTornApiKey(),
+            tornKeySource: String(state.settings.tornKey || "").trim() ? "settings" : injectedTornApiKey() ? "TornPDA injected" : "none"
         });
         if (state.data?.fetchedAt) state.status = `Showing cached data from ${timeAgo(state.data.fetchedAt)}.`;
-        else state.status = "Configure a Torn API key to begin.";
+        else state.status = hasTornApiKey() ? "Ready to refresh company data." : "Configure a Torn API key to begin.";
         resetAutoRefresh();
         resetDailyTickAlerts();
+        resetDailyRankingRefresh();
         render();
-        if (String(state.settings.tornKey || "").trim()) void refreshCore({ silent: true });
+        if (hasTornApiKey()) void refreshCore({ silent: true, scheduled: true });
         window.addEventListener("keydown", (event) => {
             if (event.altKey && event.key.toLowerCase() === "c") {
                 event.preventDefault();
@@ -2579,16 +3217,26 @@
             }
             if (event.key === "Escape" && state.modal) {
                 state.modal = null;
+                state.pendingRestore = null;
                 render();
             }
         });
-        window.addEventListener("beforeunload", () => { void persistLayout(); });
+        window.addEventListener("beforeunload", () => { void persistLayout(); void flushStorageWrites(); });
         document.addEventListener("visibilitychange", () => {
-            if (!document.hidden) void runDailyTickAlerts({ refresh: true });
+            if (documentIsHidden()) {
+                resetAutoRefresh();
+                resetDailyTickAlerts();
+                resetDailyRankingRefresh();
+                return;
+            }
+            debugLog("refresh:resumed", { source: "visibility restore" });
+            resetAutoRefresh();
+            resetDailyTickAlerts();
+            resetDailyRankingRefresh();
         });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, safeRequestDescriptor, safeDiagnosticError };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
     if (typeof document !== "undefined" && typeof window !== "undefined") {

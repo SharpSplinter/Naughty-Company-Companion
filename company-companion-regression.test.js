@@ -200,13 +200,37 @@ test("daily tick alerts use independent 18:00 and 18:10 UTC phases", () => {
     assert.equal(companion.nextDailyAlertTimestamp(incomeTick), employeeTick);
 });
 
-test("daily tick alert reports daily income, profit, customers, and freshness", () => {
+test("daily alert toasts keep full messages stacked instead of replacing one another", () => {
+    const dailyToast = source.match(/async function showDailyToast[\s\S]*?\n    }\n\n    function companyPageUrl/);
+    assert.ok(dailyToast);
+    assert.match(dailyToast[0], /showDesktopToast\(text, tone, 10\)/);
+    assert.match(dailyToast[0], /callConfirmedPdaHandler\("showToast"/);
+    assert.doesNotMatch(source, /toastChain|toastVisibleUntil/);
+});
+
+test("same-type rankings use one persisted Torn-tick refresh date and a 18:05 UTC due time", () => {
+    const before = Date.UTC(2026, 7, 24, 18, 4, 59);
+    const due = Date.UTC(2026, 7, 24, 18, 5, 0);
+    const nextMorning = Date.UTC(2026, 7, 25, 10, 0, 0);
+
+    assert.equal(companion.isDailyRankingRefreshDue(before), false);
+    assert.equal(companion.isDailyRankingRefreshDue(due), true);
+    assert.equal(companion.rankingRefreshDay(before), "2026-08-23");
+    assert.equal(companion.rankingRefreshDay(due), "2026-08-24");
+    assert.equal(companion.rankingRefreshedForDailyTick({ dailyRefreshDay: "2026-08-24" }, nextMorning), true);
+    assert.equal(companion.rankingRefreshedForDailyTick({ dailyRefreshDay: "2026-08-23" }, due), false);
+    assert.match(source, /Same-type rankings already refreshed for this Torn daily tick\./);
+    assert.match(source, /dailyRefreshDay: rankingRefreshDay\(now\)/);
+});
+
+test("daily tick alert reports full daily income, profit, customer, star, and stock-difference details", () => {
     const tick = Date.UTC(2026, 7, 24, 18, 0, 0);
     const alert = companion.buildDailyTickAlert({
         fetchedAt: tick + 1000,
         profile: {
             income: { daily: 1000, weekly: 7000 },
             customers: { daily: 88 },
+            rating: 7,
             advertisement_budget: 100,
             employees: { hired: 1 }
         },
@@ -218,7 +242,23 @@ test("daily tick alert reports daily income, profit, customers, and freshness", 
     assert.match(alert.text, /Daily Income: \$1,000/);
     assert.match(alert.text, /Daily Profit: \$800/);
     assert.match(alert.text, /Daily Customer Count: 88/);
+    assert.match(alert.text, /Star Level: 7★/);
+    assert.match(alert.text, /Stock Difference vs prior day: unavailable/);
     assert.equal(alert.source.fresh, true);
+});
+
+test("daily stock difference totals all current and prior stock items as an integer", () => {
+    const data = {
+        stockAvailable: true,
+        stock: [{ id: 1, in_stock: 120 }, { id: 3, in_stock: 5 }]
+    };
+    const prior = {
+        1: { inStock: 95 },
+        2: { inStock: 8 }
+    };
+
+    assert.equal(companion.totalStockDifference(data, prior), 22);
+    assert.equal(companion.totalStockDifference({ stockAvailable: false, stock: [] }, prior), null);
 });
 
 test("employee effectiveness alert lists every addiction or inactivity penalty below -12", () => {
@@ -277,6 +317,86 @@ test("console diagnostic descriptors never expose API query, header, or TornStat
     assert.doesNotMatch(barePathMessage, /tornstats-secret/);
 });
 
+test("storage adapter prefers PDA storage, migrates legacy-only values once, and batches writes", async () => {
+    const nativeData = { settings: { source: "native" } };
+    const legacyData = { settings: { source: "legacy" }, history: { one: true } };
+    const nativeWrites = [];
+    const scheduled = [];
+    const adapter = companion.createStorageAdapter({
+        keys: ["settings", "history", "cache"],
+        getNative: () => ({
+            loadAll: async () => nativeData,
+            setMany: async (values) => { nativeWrites.push(values); Object.assign(nativeData, values); },
+            delete: async () => {}
+        }),
+        legacy: {
+            loadAll: async () => legacyData,
+            setMany: async () => {},
+            delete: async () => {}
+        },
+        setTimer: (callback) => { scheduled.push(callback); return callback; },
+        clearTimer: () => {}
+    });
+
+    const first = await adapter.load();
+    const second = await adapter.load();
+    assert.equal(first.mode, "pda");
+    assert.deepEqual(first.values, { settings: { source: "native" }, history: { one: true } });
+    assert.deepEqual(first.migrated, { history: { one: true } });
+    assert.deepEqual(second.migrated, {});
+    assert.deepEqual(nativeWrites, [{ history: { one: true } }]);
+
+    const one = adapter.setMany({ settings: { source: "updated" } });
+    const two = adapter.setMany({ cache: { at: 1 } });
+    scheduled.at(-1)();
+    await Promise.all([one, two]);
+    assert.deepEqual(nativeWrites.at(-1), { settings: { source: "updated" }, cache: { at: 1 } });
+});
+
+test("storage adapter falls back after a native quota failure and deletes through native plus legacy storage", async () => {
+    const nativeDeletes = [];
+    const legacyWrites = [];
+    const legacyDeletes = [];
+    const quota = Object.assign(new Error("quota"), { code: "QuotaExceeded" });
+    const adapter = companion.createStorageAdapter({
+        keys: ["cache"],
+        getNative: () => ({
+            loadAll: async () => ({}),
+            setMany: async () => { throw quota; },
+            delete: async (key) => { nativeDeletes.push(key); }
+        }),
+        legacy: {
+            loadAll: async () => ({}),
+            setMany: async (values) => { legacyWrites.push(values); },
+            delete: async (key) => { legacyDeletes.push(key); }
+        }
+    });
+
+    await adapter.setMany({ cache: { retained: true } }, { immediate: true });
+    const deleted = await adapter.delete("cache");
+    assert.deepEqual(legacyWrites, [{ cache: { retained: true } }]);
+    assert.deepEqual(nativeDeletes, ["cache"]);
+    assert.deepEqual(legacyDeletes, ["cache"]);
+    assert.equal(deleted.nativeDeleted, true);
+    assert.equal(deleted.fallbackDeleted, true);
+});
+
+test("storage adapter removes queued writes before delete so stale data cannot be persisted", async () => {
+    const writes = [];
+    const adapter = companion.createStorageAdapter({
+        keys: ["cache"],
+        writeMany: async (values) => { writes.push(values); },
+        legacy: { delete: async () => {} },
+        setTimer: () => 1,
+        clearTimer: () => {}
+    });
+
+    const queued = adapter.setMany({ cache: { stale: true } });
+    await adapter.delete("cache");
+    await queued;
+    assert.deepEqual(writes, []);
+});
+
 test("rankings flow through the main panel while all Company scroll regions stay trackless", () => {
     assert.match(source, /#\$\{ROOT_ID\}, #\$\{ROOT_ID\} \* \{ box-sizing: border-box; -ms-overflow-style:none; scrollbar-width:none; \}/);
     assert.match(source, /#\$\{ROOT_ID\}::-webkit-scrollbar, #\$\{ROOT_ID\} \*::-webkit-scrollbar \{ width:0; height:0; display:none; \}/);
@@ -307,4 +427,50 @@ test("compact Company tables stack into labeled cards and tabs wrap without hori
     assert.match(source, /ncc-stack-table/);
     assert.match(source, /stackCell\("Current stock worth"/);
     assert.match(source, /stackCell\("Reporting day"/);
+});
+
+test("Company keeps Stock trend in Stock, retains compact rank lists, and exposes safe storage diagnostics", () => {
+    assert.match(source, /section\("Stock trend", stockChart\)/);
+    assert.match(source, /const trendTypes = \["income-profit", "effectiveness", "ranking"\]/);
+    assert.match(source, /data-action="open-position-config"/);
+    assert.match(source, /Position capacity & priority/);
+    assert.match(source, /ncc-rank-list/);
+    assert.match(source, /Use legacy GM storage/);
+    assert.match(source, /PDA_INJECTED_TORN_KEY/);
+    assert.match(source, /documentIsHidden\(\)/);
+    assert.match(source, /data-compact-layout="true"\] \.ncc-trend-detail \{ grid-template-columns:minmax\(0,1fr\);/);
+    assert.match(source, /DAILY_RANKINGS_REFRESH_MINUTE = 5/);
+    assert.match(source, /resetDailyRankingRefresh\(\)/);
+});
+
+test("Company backups validate their namespace and preserve API keys unless restore is explicitly enabled", () => {
+    const backup = companion.createCompanyBackupDocument({
+        "ncc:settings:v1": { tornKey: "torn-secret", tornStatsKey: "stats-secret", projectionConsent: true },
+        "ncc:history:v1": { company: [{ period: 1 }] },
+        "ncc:cache:v1": { profile: { id: 1 } }
+    }, { includeApiKeys: false, timestamp: Date.UTC(2026, 7, 24), appVersion: "1.2.0" });
+
+    assert.equal(backup.includesApiKeys, false);
+    assert.equal(Object.hasOwn(backup.stores["ncc:settings:v1"], "tornKey"), false);
+    assert.equal(Object.hasOwn(backup.stores["ncc:settings:v1"], "tornStatsKey"), false);
+    assert.doesNotThrow(() => companion.validateCompanyBackupDocument(backup));
+
+    const preserved = companion.materializeCompanyBackupStores(backup, {
+        currentSettings: { tornKey: "keep-torn", tornStatsKey: "keep-stats" }
+    });
+    assert.equal(preserved["ncc:settings:v1"].tornKey, "keep-torn");
+    assert.equal(preserved["ncc:settings:v1"].tornStatsKey, "keep-stats");
+
+    const keyBackup = companion.createCompanyBackupDocument({
+        "ncc:settings:v1": { tornKey: "replace-torn", tornStatsKey: "replace-stats" }
+    }, { includeApiKeys: true, timestamp: Date.UTC(2026, 7, 24), appVersion: "1.2.0" });
+    const restored = companion.materializeCompanyBackupStores(keyBackup, {
+        currentSettings: { tornKey: "keep-torn", tornStatsKey: "keep-stats" },
+        restoreApiKeys: true
+    });
+    assert.equal(restored["ncc:settings:v1"].tornKey, "replace-torn");
+    assert.equal(restored["ncc:settings:v1"].tornStatsKey, "replace-stats");
+    assert.throws(() => companion.validateCompanyBackupDocument({ ...backup, namespace: "other-companion" }), /wrong script namespace/);
+    assert.match(source, /data-action="download-company-backup"/);
+    assert.match(source, /case "confirm-backup-restore"/);
 });
