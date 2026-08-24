@@ -1,13 +1,13 @@
 # Naughty Company Companion
 
-Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn company directors and managers. It brings revenue, net estimates, staffing efficiency, TornStats-based role planning, same-type income ranking, stock, and local trends into one local-first panel.
+Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn company directors and managers. It brings income, profit, staffing efficiency, TornStats-based role planning, same-type income ranking, stock, and local trends into one local-first panel.
 
 ## Features
 
 ### Overview and income
 
-- Torn-reported daily and weekly revenue.
-- Daily and weekly net estimates plus 30-day tracked or forecast revenue/net figures.
+- Torn-reported daily and weekly income.
+- Daily and weekly profit plus 30-day tracked or forecast income/profit figures.
 - Company condition, funds, ad budget, trains, applications, and recent funds news when the API key can access them.
 - Same-type income rank, transparent health score, observed next-star gap, and previous-star buffer.
 
@@ -17,16 +17,17 @@ Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn compa
 - Current and assigned effectiveness prefer **TornStats role base plus Torn non-working effects**. Torn’s direct total is used only before a matching TornStats projection exists.
 - Per-employee role selector, lock control, and local-only assignment plan.
 - Dynamic roles discovered from the matching TornStats company-type block; no hard-coded position list.
-- Per-role capacity limits, priority order, and auto-assignment that locks current seats first, then fills by priority and projected efficiency within company capacity.
+- Per-role max-quantity dropdowns and persistent click-up/click-down priority controls. Auto-assignment locks current seats first, then fills top-to-bottom by priority and projected efficiency within company capacity.
 - Sortable Assignment preview columns: Employee, Current, Assigned, Current Eff., Assigned Eff., Change, and Lock.
 
 ### Rankings, stock, and trends
 
 - Same-type company ranking loaded through Torn pagination and sorted locally by weekly income.
 - Health score defined transparently as weekly-income percentile among same company type.
-- Observed weekly-income gaps to the next and previous star bands; these are planning estimates, not an official Torn formula.
+- Observed weekly-income gaps to the next and previous star bands; these are planning values, not an official Torn formula.
 - Stock, sales, gross margin, and a per-item daily **Stock difference** once a prior local reporting-day snapshot exists.
-- Local daily history retained for 92 days, trend chart, and CSV export.
+- Local daily history retained for 92 days, an axis-labeled interactive trend chart with selectable day points and daily details, and CSV export.
+- Your-company ranking context for both the current star level and the same company type.
 
 ### Interface
 
@@ -59,19 +60,19 @@ Treat API keys as secrets. Revoke and replace a key if it may have been exposed.
 
 ## Calculation notes
 
-Daily net estimate:
+Daily Profit:
 
 ```text
-daily revenue − sold stock cost − advertising budget − total wages
+daily income − sold stock cost − advertising budget − total wages
 ```
 
-Weekly net estimate:
+Weekly Profit:
 
 ```text
-weekly revenue − 7 × (advertising budget + total wages)
+weekly income − 7 × (advertising budget + total wages)
 ```
 
-Weekly net omits sold stock cost because Torn exposes stock sales as a daily value. The health score is a visible weekly-income percentile, not a hidden company-quality value. Star thresholds and gaps are observed rank cutoffs, so use them as guidance rather than a guarantee.
+Weekly profit omits sold stock cost because Torn exposes stock sales as a daily value. The health score is a visible weekly-income percentile, not a hidden company-quality value. Star thresholds and gaps are observed rank cutoffs, so use them as guidance rather than a guarantee.
 
 ## Updating and verification
 

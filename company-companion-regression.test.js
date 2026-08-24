@@ -30,7 +30,7 @@ test("ranking uses star-slot cutoffs instead of adjacent live ratings", () => {
     assert.equal(metrics.percentile, 71.4);
 });
 
-test("daily and weekly net estimates mirror company profit rules", () => {
+test("daily and weekly net profits mirror company profit rules", () => {
     const result = companion.financials({
         profile: {
             income: { daily: 1000, weekly: 7000 },
@@ -88,6 +88,10 @@ test("planner locks current seats then obeys position caps and priority", () => 
     assert.deepEqual(result.unassigned, []);
 });
 
+test("planner order keeps saved priorities first and includes new positions", () => {
+    assert.deepEqual(companion.orderedPriorityPositions(["Director", "Trainer", "Sales"], ["Sales", "Director"]), ["Sales", "Director", "Trainer"]);
+});
+
 test("reporting day rolls over at 18:10 UTC", () => {
     const before = Date.UTC(2026, 7, 18, 18, 9, 59);
     const after = Date.UTC(2026, 7, 18, 18, 10, 0);
@@ -120,4 +124,12 @@ test("assignment preview values sort through the shared table sorter", () => {
 
     assert.deepEqual(companion.sortRows(rows, { key: "change", dir: "asc" }).map((row) => row.name), ["B", "A"]);
     assert.deepEqual(companion.sortRows(rows, { key: "name", dir: "asc" }).map((row) => row.name), ["A", "B"]);
+});
+
+test("trend performance compares available daily signals with the prior day", () => {
+    const result = companion.trendPerformance(
+        { dailyIncome: 110, stockValue: 90, averageEmployeeEfficiency: 101, rating: 5 },
+        { dailyIncome: 100, stockValue: 100, averageEmployeeEfficiency: 100, rating: 5 }
+    );
+    assert.equal(result.label, "Improving");
 });

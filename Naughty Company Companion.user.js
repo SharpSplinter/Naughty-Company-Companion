@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    naughty-company-companion
-// @version      1.0.4
+// @version      1.1.0
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       Naughty
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.0.4";
+    const VERSION = "1.1.0";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -70,6 +70,7 @@
         sort: { team: { key: "total", dir: "desc" }, planner: { key: "name", dir: "asc" }, rankings: { key: "rank", dir: "asc" }, stock: { key: "sold_worth", dir: "desc" } },
         teamFilter: "",
         rankingsFilter: "",
+        selectedTrendPeriod: null,
         modal: null,
         autoRefreshId: null
     };
@@ -320,8 +321,8 @@
         const profile = data?.profile || {};
         const employees = Array.isArray(data?.employees) ? data.employees : [];
         const stock = Array.isArray(data?.stock) ? data.stock : [];
-        const dailyRevenue = asNumber(profile?.income?.daily);
-        const weeklyRevenue = asNumber(profile?.income?.weekly);
+        const dailyIncome = asNumber(profile?.income?.daily);
+        const weeklyIncome = asNumber(profile?.income?.weekly);
         const adBudget = asFinite(profile?.advertisement_budget);
         const expectedEmployees = asFinite(profile?.employees?.hired);
         const wagesAvailable = expectedEmployees === 0 || (employees.length > 0 && (expectedEmployees === null || employees.length >= expectedEmployees) && employees.every((employee) => asFinite(employee?.wage) !== null));
@@ -329,18 +330,18 @@
         const stockCost = state.settings.includeStockCost
             ? stock.reduce((sum, item) => sum + asNumber(item?.cost) * asNumber(item?.sold_amount), 0)
             : 0;
-        const baseEstimateAvailable = adBudget !== null && totalWages !== null;
-        const stockEstimateAvailable = !state.settings.includeStockCost || data?.stockAvailable !== false;
+        const baseProfitAvailable = adBudget !== null && totalWages !== null;
+        const stockProfitAvailable = !state.settings.includeStockCost || data?.stockAvailable !== false;
         return {
-            dailyRevenue,
-            weeklyRevenue,
+            dailyIncome,
+            weeklyIncome,
             adBudget,
             totalWages,
             stockCost,
-            dailyProfit: baseEstimateAvailable && stockEstimateAvailable ? dailyRevenue - stockCost - adBudget - totalWages : null,
-            weeklyProfit: baseEstimateAvailable ? weeklyRevenue - 7 * (adBudget + totalWages) : null,
-            canEstimate: baseEstimateAvailable && stockEstimateAvailable,
-            canEstimateWeekly: baseEstimateAvailable
+            dailyProfit: baseProfitAvailable && stockProfitAvailable ? dailyIncome - stockCost - adBudget - totalWages : null,
+            weeklyProfit: baseProfitAvailable ? weeklyIncome - 7 * (adBudget + totalWages) : null,
+            canProfit: baseProfitAvailable && stockProfitAvailable,
+            canProfitWeekly: baseProfitAvailable
         };
     }
 
@@ -353,18 +354,18 @@
         const now = Date.now();
         const rows = history.filter((row) => row.period > now - 30 * DAY && row.period <= now);
         const financesNow = financials(data);
-        const revenueRows = rows.filter((row) => asFinite(row.dailyRevenue) !== null);
+        const incomeRows = rows.filter((row) => asFinite(row.dailyIncome) !== null);
         const profitRows = rows.filter((row) => asFinite(row.dailyProfit) !== null);
-        const trackedRevenue = revenueRows.reduce((sum, row) => sum + asNumber(row.dailyRevenue), 0);
+        const trackedIncome = incomeRows.reduce((sum, row) => sum + asNumber(row.dailyIncome), 0);
         const trackedProfit = profitRows.reduce((sum, row) => sum + asNumber(row.dailyProfit), 0);
         return {
-            coverage: revenueRows.length,
+            coverage: incomeRows.length,
             profitCoverage: profitRows.length,
-            trackedRevenue,
+            trackedIncome,
             trackedProfit: profitRows.length ? trackedProfit : null,
-            revenueForecast: financesNow.dailyRevenue * 30,
+            incomeForecast: financesNow.dailyIncome * 30,
             profitForecast: financesNow.dailyProfit === null ? null : financesNow.dailyProfit * 30,
-            useTrackedRevenue: revenueRows.length >= 25,
+            useTrackedIncome: incomeRows.length >= 25,
             useTrackedProfit: profitRows.length >= 25
         };
     }
@@ -375,15 +376,20 @@
         const id = String(profile.id);
         const period = reportingPeriod();
         const financesNow = financials();
+        const stockNow = stockMetrics();
+        const efficiencyRows = employeeRows().map((employee) => employee.currentEfficiency).filter((value) => value !== null);
         const row = {
             period,
             capturedAt: Date.now(),
-            dailyRevenue: financesNow.dailyRevenue,
-            weeklyRevenue: financesNow.weeklyRevenue,
+            dailyIncome: financesNow.dailyIncome,
+            weeklyIncome: financesNow.weeklyIncome,
             dailyProfit: financesNow.dailyProfit,
             weeklyProfit: financesNow.weeklyProfit,
             funds: asFinite(profile.funds),
             rating: asFinite(profile.rating),
+            stockQuantity: stockNow.inStock,
+            stockValue: stockNow.saleValue,
+            averageEmployeeEfficiency: efficiencyRows.length ? efficiencyRows.reduce((sum, value) => sum + asNumber(value), 0) / efficiencyRows.length : null,
             stock: Object.fromEntries((Array.isArray(state.data?.stock) ? state.data.stock : []).map((item) => [String(item.id), {
                 inStock: asNumber(item.in_stock),
                 onOrder: asNumber(item.on_order)
@@ -527,13 +533,23 @@
         state.settings = deepMergeSettings(settings);
         state.layout = { ...DEFAULT_LAYOUT, ...(isObject(layout) ? layout : {}) };
         state.cache = isObject(cache) ? cache : null;
-        state.history = isObject(history) ? history : {};
+        state.history = normalizeHistory(history);
         state.rankings = isObject(rankings) ? rankings : {};
         state.projections = isObject(projections) ? projections : {};
         state.rankHistory = isObject(rankHistory) ? rankHistory : {};
         state.starCohorts = isObject(starCohorts) ? starCohorts : {};
         state.selectedTab = state.settings.activeTab || "overview";
         if (state.cache?.profile?.id) state.data = state.cache;
+    }
+
+    function normalizeHistory(history) {
+        if (!isObject(history)) return {};
+        return Object.fromEntries(Object.entries(history).map(([companyId, entries]) => [companyId, Array.isArray(entries) ? entries.map((entry) => {
+            if (!isObject(entry)) return entry;
+            const legacyDaily = entry[Object.keys(entry).find((key) => key.startsWith("daily") && key !== "dailyIncome" && key !== "dailyProfit")];
+            const legacyWeekly = entry[Object.keys(entry).find((key) => key.startsWith("weekly") && key !== "weeklyIncome" && key !== "weeklyProfit")];
+            return { ...entry, dailyIncome: entry.dailyIncome ?? legacyDaily, weeklyIncome: entry.weeklyIncome ?? legacyWeekly };
+        }) : []]));
     }
 
     async function refreshCore({ silent = false } = {}) {
@@ -786,6 +802,8 @@
                 .ncc-primary { border-color:#43c8a8; background:#135547; color:#dcfff5; }
                 .ncc-danger { border-color:#a75560; color:#ffc5ca; }
                 .ncc-input, .ncc-select { min-height:31px; max-width:100%; padding:6px 8px; border:1px solid #36556c; border-radius:7px; outline:none; background:#0b1724; color:#deebf4; font-size:11px; }
+                .ncc-priority-control { display:inline-flex; align-items:center; gap:6px; }
+                .ncc-priority-control .ncc-icon { width:25px; height:25px; border-radius:6px; font-size:13px; }
                 .ncc-input:focus, .ncc-select:focus { border-color:#57dbbc; box-shadow:0 0 0 2px #3ad5ac22; }
                 .ncc-input[type="search"] { min-width:170px; }
                 .ncc-check { display:flex; align-items:flex-start; gap:8px; color:#afc1ce; font-size:11px; line-height:1.35; }
@@ -839,7 +857,11 @@
                 .ncc-summary-strip b { display:block; color:#e2fff7; font-size:14px; }
                 .ncc-summary-strip small { display:block; margin-top:3px; color:#a7d8d0; font-size:9px; }
                 .ncc-chart { width:100%; min-height:175px; overflow:hidden; border:1px solid #29465d; border-radius:9px; background:#0a1724; }
-                .ncc-chart svg { display:block; width:100%; height:190px; }
+                .ncc-chart svg { display:block; width:100%; height:230px; }
+                .ncc-chart-point { cursor:pointer; stroke:#0c1a29; stroke-width:2px; transition:r .12s ease,stroke .12s ease; }
+                .ncc-chart-point:hover, .ncc-chart-point.selected { stroke:#e3fff8; }
+                .ncc-trend-detail { margin-top:10px; }
+                .ncc-trend-detail .ncc-kv { min-width:0; }
                 .ncc-modal-backdrop { position:fixed; z-index:2147483647; inset:0; display:grid; place-items:center; padding:16px; background:#000a; }
                 .ncc-modal { width:min(720px,100%); max-height:min(700px,calc(100vh - 32px)); overflow:auto; border:1px solid #46718a; border-radius:14px; background:#0c1a29; box-shadow:0 24px 72px #000c; }
                 .ncc-modal-head { display:flex; align-items:center; gap:8px; padding:12px; border-bottom:1px solid #29475e; background:#12283a; }
@@ -899,7 +921,7 @@
         ];
         const averageEfficiency = employees.length ? employees.reduce((sum, row) => sum + asNumber(row.currentEfficiency), 0) / employees.length : null;
         const profitTone = financesNow.dailyProfit === null ? "ncc-muted" : financesNow.dailyProfit >= 0 ? "ncc-good" : "ncc-bad";
-        const monthlyRevenue = monthly.useTrackedRevenue ? monthly.trackedRevenue : monthly.revenueForecast;
+        const monthlyIncome = monthly.useTrackedIncome ? monthly.trackedIncome : monthly.incomeForecast;
         const monthlyProfit = monthly.useTrackedProfit ? monthly.trackedProfit : monthly.profitForecast;
         const healthValue = rankings?.percentile === null || !rankings ? "Load" : formatPercent(rankings.percentile, 1);
         const healthSub = rankings ? `Income rank ${formatNumber(rankings.rank)} / ${formatNumber(rankings.total)}` : "Same-type weekly-income rank";
@@ -907,11 +929,11 @@
         const grid = `
             <div class="ncc-grid">
                 ${metricCard("Company", profile.name || "Unknown", `${profile.type?.name || "Unknown type"} · ${formatNumber(profile.rating)}★`)}
-                ${metricCard("Daily revenue", formatMoney(financesNow.dailyRevenue), `${formatMoney(financesNow.weeklyRevenue)} weekly`, "ncc-good")}
-                ${metricCard("Daily net estimate", formatMoney(financesNow.dailyProfit), financesNow.canEstimate ? `${formatMoney(financesNow.weeklyProfit)} weekly` : financesNow.canEstimateWeekly ? `${formatMoney(financesNow.weeklyProfit)} weekly · stock unavailable` : "Needs full wages + ad budget", profitTone)}
+                ${metricCard("Daily income", formatMoney(financesNow.dailyIncome), `${formatMoney(financesNow.weeklyIncome)} weekly`, "ncc-good")}
+                ${metricCard("Daily Profit", formatMoney(financesNow.dailyProfit), financesNow.canProfit ? `${formatMoney(financesNow.weeklyProfit)} weekly` : financesNow.canProfitWeekly ? `${formatMoney(financesNow.weeklyProfit)} weekly · stock unavailable` : "Needs full wages + ad budget", profitTone)}
                 ${metricCard("Health score", healthValue, healthSub, rankings ? "ncc-good" : "ncc-muted", rankings ? "show-health" : "load-rankings")}
-                ${metricCard("30-day revenue", formatMoney(monthlyRevenue), monthly.useTrackedRevenue ? `${monthly.coverage}/30 tracked days` : `${monthly.coverage}/30 tracked · forecast`, "ncc-good")}
-                ${metricCard("30-day net", formatMoney(monthlyProfit), monthlyProfit === null ? "Needs profit access" : monthly.useTrackedProfit ? `${monthly.profitCoverage}/30 tracked days` : `${monthly.profitCoverage}/30 tracked · forecast`, monthlyProfit !== null && monthlyProfit >= 0 ? "ncc-good" : monthlyProfit === null ? "ncc-muted" : "ncc-bad")}
+                ${metricCard("30-day income", formatMoney(monthlyIncome), monthly.useTrackedIncome ? `${monthly.coverage}/30 tracked days` : `${monthly.coverage}/30 tracked · forecast`, "ncc-good")}
+                ${metricCard("30-day Profit", formatMoney(monthlyProfit), monthlyProfit === null ? "Needs profit access" : monthly.useTrackedProfit ? `${monthly.profitCoverage}/30 tracked days` : `${monthly.profitCoverage}/30 tracked · forecast`, monthlyProfit !== null && monthlyProfit >= 0 ? "ncc-good" : monthlyProfit === null ? "ncc-muted" : "ncc-bad")}
                 ${metricCard("Workforce", `${formatNumber(profile.employees?.hired)} / ${formatNumber(profile.employees?.capacity)}`, averageEfficiency === null ? "Employee details unavailable" : `Avg effectiveness ${formatNumber(averageEfficiency, 1)}`)}
                 ${metricCard("Company cash", formatMoney(profile.funds), `Value ${formatMoney(profile.value)}`)}
             </div>`;
@@ -933,7 +955,7 @@
                 ${metricCard("Applications", formatNumber(applications.length), applications.length ? "Pending applicants" : "No pending applications")}
             </div>`;
         const recentNews = (state.data?.news || []).slice(0, 4).map((item) => `<div class="ncc-kv"><span>${escapeHtml(formatDateTime(asNumber(item.timestamp) * 1000))}</span><span title="${escapeHtml(item.text || "")}">${escapeHtml(String(item.text || "No details").replace(/<[^>]*>/g, ""))}</span></div>`).join("") || `<span class="ncc-muted">Funds news requires a Limited or higher key.</span>`;
-        return `${dataNotice()}${grid}${section("Income rank & star outlook", rankBody, `<button class="ncc-button ncc-primary" data-action="load-rankings" title="Loads every same-type company from Torn and recalculates rank, health score, and star-gap estimates" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading same-type rankings…" : rankings ? "Refresh all same-type rankings" : "Load all same-type rankings"}</button>`)}<div class="ncc-grid ncc-grid-2">${section("Company condition", conditionBody)}${section("Recent funds news", recentNews)}</div><p class="ncc-note">Revenue is supplied by Torn. Net is an estimate: daily revenue − sold stock cost − ads − wages; weekly net excludes stock cost because Torn exposes sold stock as a daily value. Monthly values become tracked totals after enough local daily snapshots.</p>`;
+        return `${dataNotice()}${grid}${section("Income rank & star outlook", rankBody, `<button class="ncc-button ncc-primary" data-action="load-rankings" title="Loads every same-type company from Torn and recalculates rank, health score, and star-gap values" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading same-type rankings…" : rankings ? "Refresh all same-type rankings" : "Load all same-type rankings"}</button>`)}<div class="ncc-grid ncc-grid-2">${section("Company condition", conditionBody)}${section("Recent funds news", recentNews)}</div><p class="ncc-note">Income is supplied by Torn. Profit is calculated as: daily income − sold stock cost − ads − wages; weekly profit excludes stock cost because Torn exposes sold stock as a daily value. Monthly values become tracked totals after enough local daily snapshots.</p>`;
     }
 
     function sortHeader(label, key, group) {
@@ -969,7 +991,9 @@
         const positions = projectionPositions();
         const settings = currentCompanySettings();
         const assignments = calculateAssignmentPreview(rows, settings);
-        const capacityRows = positions.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Position</th><th>Max qty</th><th>Priority</th><th>Occupied</th></tr></thead><tbody>${positions.map((position, index) => `<tr><td><b>${escapeHtml(position)}</b></td><td><input class="ncc-input" data-capacity="${escapeHtml(position)}" type="number" min="0" step="1" value="${asNumber(settings.capacities[position]) || ""}" placeholder="Uncapped"></td><td><input class="ncc-input" data-priority="${escapeHtml(position)}" type="number" min="1" step="1" value="${priorityNumber(position, settings.priority, index)}"></td><td>${formatNumber(assignments.occupied[position] || 0)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice warn">Load per-employee TornStats projections first. Position names are intentionally discovered from the matching company-type response rather than hard-coded.</div>`;
+        const orderedPositions = orderedPriorityPositions(positions, settings.priority);
+        const maxQty = Math.max(1, Math.floor(asNumber(state.data?.profile?.employees?.capacity, rows.length || 1)));
+        const capacityRows = positions.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Position</th><th>Max qty</th><th>Priority</th><th>Occupied</th></tr></thead><tbody>${orderedPositions.map((position, index) => `<tr><td><b>${escapeHtml(position)}</b></td><td><select class="ncc-select" data-capacity="${escapeHtml(position)}"><option value="0" ${asNumber(settings.capacities[position]) === 0 ? "selected" : ""}>Uncapped</option>${Array.from({ length: maxQty }, (_, quantity) => quantity + 1).map((quantity) => `<option value="${quantity}" ${asNumber(settings.capacities[position]) === quantity ? "selected" : ""}>${quantity}</option>`).join("")}</select></td><td><span class="ncc-priority-control"><button class="ncc-icon" data-action="priority-up" data-position="${escapeHtml(position)}" title="Move ${escapeHtml(position)} up" ${index === 0 ? "disabled" : ""}>↑</button><b>${index + 1}</b><button class="ncc-icon" data-action="priority-down" data-position="${escapeHtml(position)}" title="Move ${escapeHtml(position)} down" ${index === orderedPositions.length - 1 ? "disabled" : ""}>↓</button></span></td><td>${formatNumber(assignments.occupied[position] || 0)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice warn">Load per-employee TornStats projections first. Position names are intentionally discovered from the matching company-type response rather than hard-coded.</div>`;
         const previewRows = sortRows(rows.map((row) => {
             const hasSavedAssignment = Object.prototype.hasOwnProperty.call(settings.assignments || {}, row.id);
             const assigned = hasSavedAssignment ? settings.assignments[row.id] : row.currentPosition;
@@ -980,12 +1004,24 @@
         }), { key: (row) => ({ name: row.name, current: row.currentPosition, assigned: row.previewAssigned, currentEfficiency: row.currentEfficiency, assignedEfficiency: row.previewEfficiency, change: row.previewChange, lock: row.locked ? 1 : 0 }[state.sort.planner.key]), dir: state.sort.planner.dir });
         const rowsTable = previewRows.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr>${sortHeader("Employee", "name", "planner")}${sortHeader("Current", "current", "planner")}${sortHeader("Assigned", "assigned", "planner")}${sortHeader("Current eff.", "currentEfficiency", "planner")}${sortHeader("Assigned eff.", "assignedEfficiency", "planner")}${sortHeader("Change", "change", "planner")}${sortHeader("Lock", "lock", "planner")}</tr></thead><tbody>${previewRows.map((row) => `<tr class="${row.previewAssigned !== row.currentPosition ? "ncc-misplaced" : ""}"><td><b>${escapeHtml(row.name)}</b></td><td>${escapeHtml(row.currentPosition || "—")}</td><td>${escapeHtml(row.previewAssigned || "Unassigned")}</td><td>${formatOptionalNumber(row.currentEfficiency, 1)}</td><td class="${row.previewChange !== null && row.previewChange > 0 ? "ncc-good" : row.previewChange !== null && row.previewChange < 0 ? "ncc-bad" : ""}">${formatOptionalNumber(row.previewEfficiency, 1)}</td><td>${formatSignedNumber(row.previewChange)}</td><td>${row.locked ? "Locked" : "Flexible"}</td></tr>`).join("")}</tbody></table></div>` : "";
         const warnings = assignments.lockedOverages.map(([position, used]) => `${formatNumber(used)} locked employees exceed ${escapeHtml(position)}’s maximum.`).join(" ");
-        return `${dataNotice()}<div class="ncc-toolbar"><button class="ncc-button" data-action="save-planner" ${positions.length ? "" : "disabled"}>Save role capacity & priority</button><button class="ncc-button ncc-primary" data-action="auto-assign" ${positions.length ? "" : "disabled"}>Auto-assign unlocked staff</button><button class="ncc-button" data-action="load-projections" title="Refreshes TornStats role-efficiency choices for every employee after consent" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating…" : "Refresh TornStats role projections"}</button><span class="ncc-help">0 or blank max qty = uncapped. Lower priority number fills first.</span></div>${section("Position capacity & priority", capacityRows)}${warnings ? `<div class="ncc-notice warn">${warnings}</div>` : ""}${section("Assignment preview", rowsTable)}<p class="ncc-note">Auto assignment keeps locked employees in their current seats, then greedily fills positions by priority with the highest remaining base efficiency while respecting configured role caps and total company capacity. It only saves a local plan.</p>`;
+        return `${dataNotice()}<div class="ncc-toolbar"><button class="ncc-button" data-action="save-planner" ${positions.length ? "" : "disabled"}>Save max quantities</button><button class="ncc-button ncc-primary" data-action="auto-assign" ${positions.length ? "" : "disabled"}>Auto-assign unlocked staff</button><button class="ncc-button" data-action="load-projections" title="Refreshes TornStats role-efficiency choices for every employee after consent" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating…" : "Refresh TornStats role projections"}</button><span class="ncc-help">Priority is saved immediately. The top role fills first; choose Uncapped or 1–${formatNumber(maxQty)} for Max Qty.</span></div>${section("Position capacity & priority", capacityRows)}${warnings ? `<div class="ncc-notice warn">${warnings}</div>` : ""}${section("Assignment preview", rowsTable)}<p class="ncc-note">Auto assignment keeps locked employees in their current seats, then greedily fills positions by priority with the highest remaining base efficiency while respecting configured role caps and total company capacity. It only saves a local plan.</p>`;
     }
 
-    function priorityNumber(position, priority, fallback) {
-        const index = priority.indexOf(position);
-        return index >= 0 ? index + 1 : fallback + 1;
+    function orderedPriorityPositions(positions, priority = []) {
+        return [...priority.filter((position) => positions.includes(position)), ...positions.filter((position) => !priority.includes(position))];
+    }
+
+    async function movePlannerPriority(position, direction) {
+        const settings = currentCompanySettings();
+        const ordered = orderedPriorityPositions(projectionPositions(), settings.priority);
+        const index = ordered.indexOf(position);
+        const next = index + direction;
+        if (index < 0 || next < 0 || next >= ordered.length || !settings.id) return;
+        [ordered[index], ordered[next]] = [ordered[next], ordered[index]];
+        state.settings.positionPriority[settings.id] = ordered;
+        await saveSettings({ positionPriority: state.settings.positionPriority });
+        state.status = "Position priority saved.";
+        render();
     }
 
     function calculateAssignmentPreview(rows = employeeRows(), settings = currentCompanySettings()) {
@@ -1019,9 +1055,14 @@
         rows = sortRows(rows, { key: keyMap[state.sort.rankings.key] || "rank", dir: state.sort.rankings.dir });
         const shown = rows.slice(0, 500);
         const slotSource = state.starCohorts?.[id]?.source === "post-reset" ? "Sunday post-reset slot snapshot" : "first observed this Torn week";
-        const strip = `<div class="ncc-summary-strip"><div><b>${formatNumber(metrics.rank)}</b><small>Your rank / ${formatNumber(metrics.total)}</small></div><div><b>${formatMoney(incomeOf(profile))}</b><small>Weekly revenue</small></div><div><b class="${metrics.nextGap === 0 ? "ncc-good" : "ncc-warn"}">${formatMoney(metrics.nextGap)}</b><small>Gap to ${metrics.nextStar || "next"}★</small></div><div><b class="ncc-good">${formatMoney(metrics.previousBuffer)}</b><small>Buffer to ${metrics.previousStar || "previous"}★</small></div><div><b>${formatPercent(metrics.percentile, 1)}</b><small>Health score / income rank</small></div><div><b class="${change.startsWith("▲") ? "ncc-good" : change.startsWith("▼") ? "ncc-bad" : ""}">${escapeHtml(change.split(" ")[0])}</b><small>${escapeHtml(change)}</small></div></div>`;
-        const table = `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr>${sortHeader("Rank", "rank", "rankings")}${sortHeader("Company", "name", "rankings")}${sortHeader("Rating", "rating", "rankings")}${sortHeader("Daily revenue", "daily", "rankings")}${sortHeader("Weekly revenue", "weekly", "rankings")}</tr></thead><tbody>${shown.map((row) => `<tr class="${row.own ? "ncc-own-row" : ""}"><td>${formatNumber(row.rank)}</td><td><b>${escapeHtml(row.name || "Unknown")}</b>${row.own ? " <span class=\"ncc-pill good\">Your company</span>" : ""}</td><td>${formatNumber(row.rating)}★</td><td>${formatMoney(row.daily, true)}</td><td>${formatMoney(row.weekly, true)}</td></tr>`).join("")}</tbody></table></div>`;
-        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-rankings-filter" type="search" value="${escapeHtml(state.rankingsFilter)}" placeholder="Filter company or rank"><button class="ncc-button ncc-primary" data-action="load-rankings" title="Reloads all same-type Torn companies, then recalculates rank and star gaps" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading same-type rankings…" : "Refresh all same-type rankings"}</button><button class="ncc-button" data-action="show-health">View rank neighbors</button><span class="ncc-help">Updated ${timeAgo(record.fetchedAt)} · ${formatNumber(metrics.total)} companies</span></div>${section("Your company", `${strip}<p class="ncc-note">Health score is your weekly-income percentile among the same company type. Star slots use a ${slotSource}; the earnings gaps are observed projections, not official Torn thresholds.</p>`)}${section("Same-type companies", `${table}${rows.length > shown.length ? `<p class="ncc-note">Showing the first ${formatNumber(shown.length)} filtered companies.</p>` : ""}`)}`;
+        const starLevel = ratingOf(profile);
+        const starCompanies = metrics.ranked.filter((company) => ratingOf(company) === starLevel);
+        const foundStarRank = starCompanies.findIndex((company) => String(company.id) === id);
+        const starRank = foundStarRank >= 0 ? foundStarRank + 1 : metrics.rank;
+        const rankContext = `<div><b>${formatNumber(starRank)} out of ${formatNumber(starCompanies.length)}</b><small>${formatNumber(starRank)}/${formatNumber(starCompanies.length)} in your ${formatNumber(starLevel)}★ star level</small><small>${formatNumber(metrics.rank)} out of ${formatNumber(metrics.total)}</small><small>${formatNumber(metrics.rank)}/${formatNumber(metrics.total)} in same company type</small></div>`;
+        const strip = `<div class="ncc-summary-strip">${rankContext}<div><b>${formatMoney(incomeOf(profile))}</b><small>Weekly income</small></div><div><b class="${metrics.nextGap === 0 ? "ncc-good" : "ncc-warn"}">${formatMoney(metrics.nextGap)}</b><small>Gap to ${metrics.nextStar || "next"}★</small></div><div><b class="ncc-good">${formatMoney(metrics.previousBuffer)}</b><small>Buffer to ${metrics.previousStar || "previous"}★</small></div><div><b>${formatPercent(metrics.percentile, 1)}</b><small>Health score / income rank</small></div><div><b class="${change.startsWith("▲") ? "ncc-good" : change.startsWith("▼") ? "ncc-bad" : ""}">${escapeHtml(change.split(" ")[0])}</b><small>${escapeHtml(change)}</small></div></div>`;
+        const table = `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr>${sortHeader("Rank", "rank", "rankings")}${sortHeader("Company", "name", "rankings")}${sortHeader("Rating", "rating", "rankings")}${sortHeader("Daily income", "daily", "rankings")}${sortHeader("Weekly income", "weekly", "rankings")}</tr></thead><tbody>${shown.map((row) => `<tr class="${row.own ? "ncc-own-row" : ""}"><td>${formatNumber(row.rank)}</td><td><b>${escapeHtml(row.name || "Unknown")}</b>${row.own ? " <span class=\"ncc-pill good\">Your company</span>" : ""}</td><td>${formatNumber(row.rating)}★</td><td>${formatMoney(row.daily, true)}</td><td>${formatMoney(row.weekly, true)}</td></tr>`).join("")}</tbody></table></div>`;
+        return `${dataNotice()}<div class="ncc-toolbar"><input class="ncc-input" id="ncc-rankings-filter" type="search" value="${escapeHtml(state.rankingsFilter)}" placeholder="Filter company or rank"><button class="ncc-button ncc-primary" data-action="load-rankings" title="Reloads all same-type Torn companies, then recalculates rank and star gaps" ${state.rankingLoading ? "disabled" : ""}>${state.rankingLoading ? "Loading same-type rankings…" : "Refresh all same-type rankings"}</button><button class="ncc-button" data-action="show-health">View rank neighbors</button><span class="ncc-help">Updated ${timeAgo(record.fetchedAt)} · ${formatNumber(metrics.total)} companies</span></div>${section("Your company", `${strip}<p class="ncc-note">Health score is your weekly-income percentile among the same company type. Star slots use a ${slotSource}; the income gaps are observed planning values, not official Torn thresholds.</p>`)}${section("Same-type companies", `${table}${rows.length > shown.length ? `<p class="ncc-note">Showing the first ${formatNumber(shown.length)} filtered companies.</p>` : ""}`)}`;
     }
 
     function stockMetrics() {
@@ -1070,27 +1111,53 @@
         return `${dataNotice()}<div class="ncc-grid ncc-grid-3">${metricCard("Stock items", formatNumber(totals.inStock), `${formatNumber(totals.onOrder)} on order`)}${metricCard("Stock value", formatMoney(totals.saleValue), `${formatMoney(totals.costValue)} at cost`, "ncc-good")}${metricCard("Reported gross margin", formatMoney(totals.margin), `${formatMoney(totals.soldWorth)} sold worth`, totals.margin >= 0 ? "ncc-good" : "ncc-bad")}</div>${section("Stock & sales", table)}<p class="ncc-note">Stock difference is today’s in-stock amount minus the last local Torn reporting-day snapshot. It appears after a prior daily snapshot exists. Reported gross margin = sold worth − (cost × sold amount).</p>`;
     }
 
+    function trendPerformance(row, prior) {
+        if (!prior) return { label: "Baseline", tone: "ncc-muted", detail: "First recorded day" };
+        const checks = [[row.dailyIncome, prior.dailyIncome], [row.stockValue, prior.stockValue], [row.averageEmployeeEfficiency, prior.averageEmployeeEfficiency], [row.rating, prior.rating]];
+        const score = checks.reduce((total, [current, previous]) => {
+            const a = asFinite(current);
+            const b = asFinite(previous);
+            return a === null || b === null || a === b ? total : total + (a > b ? 1 : -1);
+        }, 0);
+        return score > 0 ? { label: "Improving", tone: "ncc-good", detail: `${score} positive daily signals` } : score < 0 ? { label: "Declining", tone: "ncc-bad", detail: `${Math.abs(score)} negative daily signals` } : { label: "Mixed / steady", tone: "ncc-warn", detail: "No net daily signal change" };
+    }
+
+    function trendDetail(row, prior) {
+        const performance = trendPerformance(row, prior);
+        return `<div class="ncc-grid ncc-grid-3 ncc-trend-detail"><div class="ncc-kv"><span>Daily income</span><span>${formatMoney(row.dailyIncome)}</span></div><div class="ncc-kv"><span>Stock</span><span>${asFinite(row.stockValue) === null ? "—" : `${formatMoney(row.stockValue, true)} · ${formatNumber(row.stockQuantity)} qty`}</span></div><div class="ncc-kv"><span>Avg employee eff.</span><span>${formatOptionalNumber(row.averageEmployeeEfficiency, 1)}</span></div><div class="ncc-kv"><span>Star level</span><span>${formatNumber(row.rating)}★</span></div><div class="ncc-kv"><span>Daily profit</span><span class="${asFinite(row.dailyProfit) !== null && row.dailyProfit >= 0 ? "ncc-good" : "ncc-bad"}">${formatMoney(row.dailyProfit)}</span></div><div class="ncc-kv"><span>Performance vs previous day</span><span class="${performance.tone}">${performance.label}</span></div></div><p class="ncc-note">${escapeHtml(formatDateTime(row.period))} · ${escapeHtml(performance.detail)}. Select another point to compare that day with its prior local snapshot.</p>`;
+    }
+
     function trendSvg(history) {
         const rows = history.slice(-30);
-        if (rows.length < 2) return `<div class="ncc-empty">A line chart appears after at least two local daily snapshots.</div>`;
-        const values = rows.flatMap((row) => [asFinite(row.dailyRevenue), asFinite(row.dailyProfit)]).filter((value) => value !== null);
+        if (rows.length < 2) return `<div class="ncc-empty">A chart with selectable daily points appears after at least two local daily snapshots.</div>`;
+        const selected = rows.find((row) => row.period === state.selectedTrendPeriod) || rows[rows.length - 1];
+        const selectedIndex = rows.findIndex((row) => row.period === selected.period);
+        const prior = selectedIndex > 0 ? rows[selectedIndex - 1] : null;
+        const values = rows.flatMap((row) => [asFinite(row.dailyIncome), asFinite(row.dailyProfit)]).filter((value) => value !== null);
         const min = Math.min(0, ...values);
         const max = Math.max(1, ...values);
         const width = 700;
-        const height = 190;
-        const pad = 18;
-        const x = (index) => pad + (index / Math.max(1, rows.length - 1)) * (width - pad * 2);
-        const y = (value) => height - pad - ((asNumber(value) - min) / Math.max(1, max - min)) * (height - pad * 2);
+        const height = 230;
+        const left = 68;
+        const right = 16;
+        const top = 14;
+        const bottom = 34;
+        const x = (index) => left + (index / Math.max(1, rows.length - 1)) * (width - left - right);
+        const y = (value) => height - bottom - ((asNumber(value) - min) / Math.max(1, max - min)) * (height - top - bottom);
         const points = (key) => rows.map((row, index) => `${x(index).toFixed(1)},${y(row[key]).toFixed(1)}`).join(" ");
-        const zero = y(0);
-        return `<div class="ncc-chart"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Daily revenue and net estimate trend"><line x1="${pad}" x2="${width - pad}" y1="${zero}" y2="${zero}" stroke="#496277" stroke-dasharray="4 4"/><polyline fill="none" stroke="#55ddb8" stroke-width="3" points="${points("dailyRevenue")}"/><polyline fill="none" stroke="#69aef7" stroke-width="3" points="${points("dailyProfit")}"/></svg></div><div class="ncc-inline" style="margin-top:7px"><span class="ncc-pill good">● Revenue</span><span class="ncc-pill">● Net estimate</span><span class="ncc-help">${formatDateTime(rows[0].period)} → ${formatDateTime(rows[rows.length - 1].period)}</span></div>`;
+        const ticks = Array.from({ length: 5 }, (_, index) => min + ((max - min) * index / 4));
+        const dateIndexes = [...new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1])];
+        const grid = ticks.map((value) => `<g><line x1="${left}" x2="${width - right}" y1="${y(value)}" y2="${y(value)}" stroke="#2b4a61" stroke-dasharray="3 4"/><text x="${left - 7}" y="${y(value) + 3}" text-anchor="end" fill="#8ea5b6" font-size="9">${escapeHtml(formatMoney(value, true))}</text></g>`).join("");
+        const labels = dateIndexes.map((index) => `<text x="${x(index)}" y="${height - 12}" text-anchor="middle" fill="#8ea5b6" font-size="9">${escapeHtml(new Date(rows[index].period).toLocaleDateString(undefined, { month: "short", day: "numeric" }))}</text>`).join("");
+        const dailyPoints = rows.map((row, index) => `<circle class="ncc-chart-point ${row.period === selected.period ? "selected" : ""}" data-action="select-trend" data-period="${row.period}" cx="${x(index)}" cy="${y(row.dailyIncome)}" r="${row.period === selected.period ? 5 : 3.5}" fill="#55ddb8"><title>${escapeHtml(formatDateTime(row.period))}: ${escapeHtml(formatMoney(row.dailyIncome))}</title></circle>`).join("");
+        return `<div class="ncc-chart"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Daily income and profit trend; select an income point for daily details"><line x1="${left}" x2="${left}" y1="${top}" y2="${height - bottom}" stroke="#55748a"/><line x1="${left}" x2="${width - right}" y1="${height - bottom}" y2="${height - bottom}" stroke="#55748a"/>${grid}<polyline fill="none" stroke="#55ddb8" stroke-width="3" points="${points("dailyIncome")}"/><polyline fill="none" stroke="#69aef7" stroke-width="3" points="${points("dailyProfit")}"/>${dailyPoints}${labels}</svg></div><div class="ncc-inline" style="margin-top:7px"><span class="ncc-pill good">● Income</span><span class="ncc-pill">● Profit</span><span class="ncc-help">Select an income point · ${formatDateTime(rows[0].period)} → ${formatDateTime(rows[rows.length - 1].period)}</span></div>${trendDetail(selected, prior)}`;
     }
 
     function renderTrends() {
         const history = companyHistory();
         const latest = [...history].reverse().slice(0, 30);
-        const table = latest.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Reporting day</th><th>Daily revenue</th><th>Daily net</th><th>Weekly revenue</th><th>Weekly net</th><th>Rating</th><th>Funds</th></tr></thead><tbody>${latest.map((row) => `<tr><td>${escapeHtml(formatDateTime(row.period))}</td><td class="ncc-good">${formatMoney(row.dailyRevenue)}</td><td class="${asNumber(row.dailyProfit) >= 0 ? "ncc-good" : "ncc-bad"}">${formatMoney(row.dailyProfit)}</td><td>${formatMoney(row.weeklyRevenue)}</td><td>${formatMoney(row.weeklyProfit)}</td><td>${formatNumber(row.rating)}★</td><td>${formatMoney(row.funds)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice">The companion keeps one local snapshot per Torn reporting day (18:10 UTC). Refresh after installing to begin history.</div>`;
-        return `${dataNotice()}<div class="ncc-toolbar"><button class="ncc-button" data-action="export-history" ${history.length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="reset-history" ${history.length ? "" : "disabled"}>Clear local history</button><span class="ncc-help">${formatNumber(history.length)} retained daily snapshots · 92-day retention</span></div>${section("Income & net trend", trendSvg(history))}${section("Local company history", table)}<p class="ncc-note">History stays in your userscript storage. It is never uploaded by this companion. A missing Limited/director field stays blank rather than becoming a false estimate.</p>`;
+        const table = latest.length ? `<div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Reporting day</th><th>Daily income</th><th>Daily Profit</th><th>Weekly income</th><th>Weekly Profit</th><th>Rating</th><th>Funds</th></tr></thead><tbody>${latest.map((row) => `<tr><td>${escapeHtml(formatDateTime(row.period))}</td><td class="ncc-good">${formatMoney(row.dailyIncome)}</td><td class="${asNumber(row.dailyProfit) >= 0 ? "ncc-good" : "ncc-bad"}">${formatMoney(row.dailyProfit)}</td><td>${formatMoney(row.weeklyIncome)}</td><td>${formatMoney(row.weeklyProfit)}</td><td>${formatNumber(row.rating)}★</td><td>${formatMoney(row.funds)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice">The companion keeps one local snapshot per Torn reporting day (18:10 UTC). Refresh after installing to begin history.</div>`;
+        return `${dataNotice()}<div class="ncc-toolbar"><button class="ncc-button" data-action="export-history" ${history.length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="reset-history" ${history.length ? "" : "disabled"}>Clear local history</button><span class="ncc-help">${formatNumber(history.length)} retained daily snapshots · 92-day retention</span></div>${section("Income & Profit trend", trendSvg(history))}${section("Local company history", table)}<p class="ncc-note">History stays in your userscript storage. It is never uploaded by this companion. A missing Limited/director field stays blank rather than being treated as a value.</p>`;
     }
 
     function renderSettings() {
@@ -1102,12 +1169,12 @@
         const metrics = rankingMetrics();
         if (!metrics) return "";
         const rows = metrics.neighbors.map((company) => `<tr class="${company.rank === metrics.rank ? "ncc-own-row" : ""}"><td>${formatNumber(company.rank)}</td><td><b>${escapeHtml(company.name || "Unknown")}</b></td><td>${formatNumber(company.rating)}★</td><td>${formatMoney(incomeOf(company, "daily"), true)}</td><td>${formatMoney(incomeOf(company), true)}</td></tr>`).join("");
-        return `<div class="ncc-modal-backdrop" data-action="close-modal"><section class="ncc-modal" role="dialog" aria-modal="true" aria-label="Health score neighbors"><header class="ncc-modal-head"><h2>Health score · income rank</h2><button class="ncc-icon" data-action="close-modal">×</button></header><div class="ncc-modal-body"><div class="ncc-grid ncc-grid-3">${metricCard("Health score", formatPercent(metrics.percentile, 1), "Weekly-income percentile", "ncc-good")}${metricCard("Your rank", `${formatNumber(metrics.rank)} / ${formatNumber(metrics.total)}`, "Same company type")}${metricCard("Weekly revenue", formatMoney(incomeOf(state.data?.profile)), "Current Torn value")}</div><p class="ncc-note">Health score is not a Torn API field or a hidden company-quality formula. It is the companion’s transparent weekly-income percentile: (companies − rank + 1) / companies.</p><div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Rank</th><th>Company</th><th>Rating</th><th>Daily revenue</th><th>Weekly revenue</th></tr></thead><tbody>${rows}</tbody></table></div></div></section></div>`;
+        return `<div class="ncc-modal-backdrop" data-action="close-modal"><section class="ncc-modal" role="dialog" aria-modal="true" aria-label="Health score neighbors"><header class="ncc-modal-head"><h2>Health score · income rank</h2><button class="ncc-icon" data-action="close-modal">×</button></header><div class="ncc-modal-body"><div class="ncc-grid ncc-grid-3">${metricCard("Health score", formatPercent(metrics.percentile, 1), "Weekly-income percentile", "ncc-good")}${metricCard("Your rank", `${formatNumber(metrics.rank)} / ${formatNumber(metrics.total)}`, "Same company type")}${metricCard("Weekly income", formatMoney(incomeOf(state.data?.profile)), "Current Torn value")}</div><p class="ncc-note">Health score is not a Torn API field or a hidden company-quality formula. It is the companion’s transparent weekly-income percentile: (companies − rank + 1) / companies.</p><div class="ncc-table-wrap"><table class="ncc-table"><thead><tr><th>Rank</th><th>Company</th><th>Rating</th><th>Daily income</th><th>Weekly income</th></tr></thead><tbody>${rows}</tbody></table></div></div></section></div>`;
     }
 
     function renderMain() {
         if (!state.data?.profile && state.selectedTab === "settings") return renderSettings();
-        if (!state.data?.profile) return `${dataNotice()}<div class="ncc-empty"><div><p>Enter a Torn API key in Settings to load your company profile, team, stock, revenue, and rankings.</p><button class="ncc-button ncc-primary" data-tab="settings">Open settings</button></div></div>`;
+        if (!state.data?.profile) return `${dataNotice()}<div class="ncc-empty"><div><p>Enter a Torn API key in Settings to load your company profile, team, stock, income, and rankings.</p><button class="ncc-button ncc-primary" data-tab="settings">Open settings</button></div></div>`;
         switch (state.selectedTab) {
             case "team": return renderTeam();
             case "planner": return renderPlanner();
@@ -1184,11 +1251,9 @@
             const capacity = asNumber(input.value);
             if (position && capacity > 0) capacities[position] = Math.floor(capacity);
         });
-        const priorities = [...document.querySelectorAll("[data-priority]")].map((input) => ({ position: input.getAttribute("data-priority"), priority: asNumber(input.value, 9999) })).filter((item) => item.position).sort((left, right) => left.priority - right.priority || left.position.localeCompare(right.position)).map((item) => item.position);
         state.settings.positionCapacities[settings.id] = capacities;
-        state.settings.positionPriority[settings.id] = priorities;
         await saveSettings({ positionCapacities: state.settings.positionCapacities, positionPriority: state.settings.positionPriority });
-        state.status = "Position capacities and priority saved.";
+        state.status = "Position max quantities saved.";
         render();
     }
 
@@ -1228,9 +1293,9 @@
         const profile = state.data?.profile;
         const rows = companyHistory(profile?.id);
         if (!rows.length) return;
-        const headers = ["reporting_day_utc", "daily_revenue", "daily_net_estimate", "weekly_revenue", "weekly_net_estimate", "funds", "rating"];
+        const headers = ["reporting_day_utc", "daily_income", "daily_net_profit", "weekly_income", "weekly_net_profit", "funds", "rating"];
         const esc = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-        const csv = [headers.join(","), ...rows.map((row) => [new Date(row.period).toISOString(), row.dailyRevenue, row.dailyProfit, row.weeklyRevenue, row.weeklyProfit, row.funds, row.rating].map(esc).join(","))].join("\n");
+        const csv = [headers.join(","), ...rows.map((row) => [new Date(row.period).toISOString(), row.dailyIncome, row.dailyProfit, row.weeklyIncome, row.weeklyProfit, row.funds, row.rating].map(esc).join(","))].join("\n");
         const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement("a");
@@ -1324,8 +1389,11 @@
                     case "load-rankings": await loadRankings({ force: true }); break;
                     case "load-projections": await loadProjections(); break;
                     case "show-health": state.modal = "health"; render(); break;
+                    case "select-trend": state.selectedTrendPeriod = asNumber(element.getAttribute("data-period")); render(); break;
                     case "close-modal": state.modal = null; render(); break;
                     case "save-planner": await savePlannerSettings(); break;
+                    case "priority-up": await movePlannerPriority(element.getAttribute("data-position"), -1); break;
+                    case "priority-down": await movePlannerPriority(element.getAttribute("data-position"), 1); break;
                     case "auto-assign": await autoAssign(); break;
                     case "save-settings": await saveSettingsFromForm(); break;
                     case "verify-refresh": await saveSettingsFromForm(); await refreshCore(); break;
@@ -1398,7 +1466,7 @@
         window.addEventListener("beforeunload", () => { void persistLayout(); });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, preferredCurrentEfficiency, sortRows };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, preferredCurrentEfficiency, sortRows, orderedPriorityPositions, trendPerformance };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof document !== "undefined" && typeof window !== "undefined") {
         if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { void boot(); }, { once: true });
