@@ -471,6 +471,8 @@ test("rankings flow through the main panel while all Company scroll regions stay
     assert.match(source, /\.ncc-summary-strip \{ display:grid; grid-template-columns:repeat\(6,minmax\(120px,1fr\)\); overflow-x:auto; overflow-y:hidden;/);
     assert.doesNotMatch(source, /\.ncc-table-wrap\s*\{[^}]*max-height:/);
     assert.doesNotMatch(source, /\.ncc-table-wrap\s*\{[^}]*overflow:auto/);
+    assert.match(source, /#ncc-content \{[\s\S]*overflow-y:auto;[\s\S]*touch-action:pan-y pinch-zoom;[\s\S]*-webkit-overflow-scrolling:touch;/, "the main Company panel must support touch-driven vertical scrolling");
+    assert.match(source, /\[data-runtime="mobile"\] #ncc-content \{[\s\S]*overflow-y:auto !important;[\s\S]*touch-action:pan-y pinch-zoom;/, "TornPDA and compact runtimes must keep Company content vertically scrollable");
 });
 
 test("compact responsive layout uses actual panel width and keeps bounds inside the visible viewport", () => {

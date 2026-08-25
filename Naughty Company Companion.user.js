@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.2.8
+// @version      1.2.9
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -27,7 +27,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.8";
+    const VERSION = "1.2.9";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -2360,7 +2360,7 @@
                 .ncc-tab { flex:0 0 auto; min-height:30px; padding:6px 10px; border:1px solid transparent; border-radius:7px; background:transparent; color:#8fa6b9; cursor:pointer; font-size:11px; font-weight:700; }
                 .ncc-tab:hover { color:#e0eef7; background:#14283a; }
                 .ncc-tab.active { background:#163a48; color:#dffcf4; }
-                #ncc-content { min-width:0; min-height:0; flex:1; overflow-x:hidden; overflow-y:auto; padding:12px; }
+                #ncc-content { min-width:0; min-height:0; flex:1; overflow-x:hidden; overflow-y:auto; padding:12px; overscroll-behavior:contain; touch-action:pan-y pinch-zoom; -webkit-overflow-scrolling:touch; }
                 .ncc-section { margin-bottom:12px; border:1px solid #29465d; border-radius:11px; background:#0d1b2a; overflow:hidden; }
                 .ncc-section-head { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:10px 11px; border-bottom:1px solid #243e54; background:#112235; }
                 .ncc-section-head h2, .ncc-section-head h3 { margin:0; color:#e4f3fa; font-size:12px; letter-spacing:.01em; }
@@ -2503,7 +2503,7 @@
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-grid, #${ROOT_ID}[data-runtime="mobile"] .ncc-grid.ncc-grid-2 { grid-template-columns:1fr; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-card { min-height:73px; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-value { font-size:18px; }
-                #${ROOT_ID}[data-runtime="mobile"] #ncc-content { padding:9px; }
+                #${ROOT_ID}[data-runtime="mobile"] #ncc-content { padding:9px; overflow-x:hidden !important; overflow-y:auto !important; overscroll-behavior:contain; touch-action:pan-y pinch-zoom; -webkit-overflow-scrolling:touch; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-table { white-space:normal; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-table th, #${ROOT_ID}[data-runtime="mobile"] .ncc-table td { padding:8px 6px; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-input[type="search"] { min-width:130px; flex:1; }
