@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.2.5
+// @version      1.2.6
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -27,7 +27,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.5";
+    const VERSION = "1.2.6";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -80,6 +80,8 @@
         tornStatsKey: "",
         projectionConsent: false,
         includeStockCost: true,
+        dailyTickToasts: false,
+        dailyTickNotifications: false,
         useLegacyGMStorage: false,
         autoRefreshMinutes: 10,
         activeTab: "overview",
@@ -284,7 +286,7 @@
         const settings = raw.stores[STORE.settings];
         const allowedSettings = new Set(Object.keys(DEFAULT_SETTINGS));
         if (Object.keys(settings).some((key) => !allowedSettings.has(key))) backupValidationError("settings payload contains unsupported fields");
-        ["projectionConsent", "includeStockCost", "useLegacyGMStorage"].forEach((key) => {
+        ["projectionConsent", "includeStockCost", "dailyTickToasts", "dailyTickNotifications", "useLegacyGMStorage"].forEach((key) => {
             if (hasOwn(settings, key) && typeof settings[key] !== "boolean") backupValidationError(`invalid ${key} setting`);
         });
         if (hasOwn(settings, "autoRefreshMinutes") && (!Number.isFinite(Number(settings.autoRefreshMinutes)) || Number(settings.autoRefreshMinutes) < 2 || Number(settings.autoRefreshMinutes) > 120)) backupValidationError("invalid automatic refresh setting");
@@ -925,7 +927,21 @@
         return showDesktopToast(text, tone, seconds);
     }
 
+    function dailyAlertDeliveryChannels(settings = state.settings) {
+        const source = isObject(settings) ? settings : {};
+        return {
+            toast: source.dailyTickToasts === true,
+            notification: source.dailyTickNotifications === true
+        };
+    }
+
+    function dailyTickAlertsEnabled(settings = state.settings) {
+        const channels = dailyAlertDeliveryChannels(settings);
+        return channels.toast || channels.notification;
+    }
+
     async function showDailyToast(text, tone = "good") {
+        if (!dailyAlertDeliveryChannels().toast) return false;
         const stacked = showDesktopToast(text, tone, 10);
         const colors = tone === "bad"
             ? { bgColor: { a: 255, r: 125, g: 35, b: 47 }, textColor: { a: 255, r: 255, g: 245, b: 245 } }
@@ -970,6 +986,7 @@
     }
 
     async function showDailyNotification(alert, text) {
+        if (!dailyAlertDeliveryChannels().notification) return false;
         const nativeResponse = await callConfirmedPdaHandler("scheduleNotification", {
             title: alert.title,
             subtitle: text,
@@ -1007,6 +1024,7 @@
     }
 
     async function scheduleDailyTickReminder(kind, { force = false } = {}) {
+        if (!dailyAlertDeliveryChannels().notification) return false;
         const reminder = buildDailyTickReminder(kind);
         if (!reminder) return false;
         if (!force && state.dailyReminders?.[kind]?.timestamp === reminder.timestamp) return true;
@@ -1032,6 +1050,12 @@
         if (dailyAlertRuntime.reminderRefreshPromise) return dailyAlertRuntime.reminderRefreshPromise;
         dailyAlertRuntime.reminderRefreshPromise = (async () => {
             if (!nativeRuntime.isTornPDA && !await confirmTornPDA()) return false;
+            if (!dailyAlertDeliveryChannels().notification) {
+                const scheduledKinds = Object.keys(DAILY_ALERTS).filter((kind) => state.dailyReminders?.[kind]);
+                if (!scheduledKinds.length) return true;
+                const results = await Promise.all(scheduledKinds.map((kind) => cancelDailyTickReminder(kind)));
+                return results.every(Boolean);
+            }
             const results = await Promise.all(Object.keys(DAILY_ALERTS).map((kind) => scheduleDailyTickReminder(kind, { force })));
             return results.every(Boolean);
         })();
@@ -1044,14 +1068,15 @@
 
     async function deliverDailyAlert(kind, payload) {
         const alert = DAILY_ALERTS[kind];
-        if (!alert) return false;
+        const channels = dailyAlertDeliveryChannels();
+        if (!alert || !channels.toast && !channels.notification) return false;
         const native = nativeRuntime.isTornPDA || await confirmTornPDA();
         if (native) await cancelDailyTickReminder(kind);
         const tone = kind === "employeeRisk" && payload.risks?.length ? "bad" : payload.unavailable ? "warn" : "good";
-        const results = await Promise.allSettled([
-            showDailyToast(payload.text, tone),
-            showDailyNotification(alert, payload.text)
-        ]);
+        const deliveries = [];
+        if (channels.toast) deliveries.push(showDailyToast(payload.text, tone));
+        if (channels.notification) deliveries.push(showDailyNotification(alert, payload.text));
+        const results = await Promise.allSettled(deliveries);
         if (native) await refreshDailyTickReminders();
         return results.some((result) => result.status === "fulfilled" && result.value === true);
     }
@@ -1459,6 +1484,7 @@
             return false;
         }
         const now = Date.now();
+        if (!dailyTickAlertsEnabled()) return false;
         if (!hasTornApiKey()) return false;
         let pending = pendingDailyAlertKinds(now);
         if (!pending.length) return;
@@ -1492,6 +1518,7 @@
             debugLog("refresh:paused", { source: "daily tick timer", reason: "document hidden" });
             return;
         }
+        if (!dailyTickAlertsEnabled()) return;
         const target = nextDailyAlertTimestamp();
         const delay = Math.max(0, target - Date.now() - 1000);
         dailyAlertRuntime.timerId = setTimeout(async () => {
@@ -1509,7 +1536,7 @@
     function resetDailyTickAlerts() {
         scheduleDailyTickAlerts();
         void refreshDailyTickReminders();
-        if (!documentIsHidden()) void runDailyTickAlerts({ refresh: true, scheduled: true });
+        if (!documentIsHidden() && dailyTickAlertsEnabled()) void runDailyTickAlerts({ refresh: true, scheduled: true });
     }
 
     function nextDailyRankingRefreshTimestamp(timestamp = Date.now()) {
@@ -2722,8 +2749,9 @@
         const runtime = nativeRuntime.isTornPDA ? "TornPDA (native confirmed)" : tornPdaUserAgent(currentUserAgent()) ? "TornPDA (native confirmation pending)" : "Desktop / Tampermonkey";
         const screenSize = `${formatNumber(viewport.width)} × ${formatNumber(viewport.height)} visible${panelRect ? ` · panel ${formatNumber(Math.round(panelRect.width))} × ${formatNumber(Math.round(panelRect.height))}` : ""}`;
         const runtimeStorage = section("Runtime & storage", `<div class="ncc-kv"><span>Runtime</span><span>${escapeHtml(runtime)} · ${escapeHtml(state.runtimeMode)}</span></div><div class="ncc-kv"><span>Current screen size</span><span>${escapeHtml(screenSize)}</span></div><div class="ncc-kv"><span>Storage method</span><span>${escapeHtml(storageMethodLabel())}</span></div><label class="ncc-check" style="margin-top:10px"><input id="ncc-use-legacy-gm-storage" type="checkbox" ${settings.useLegacyGMStorage ? "checked" : ""}><span><b>Use legacy GM storage</b><br>Unchecked keeps TornPDA <code>PDA_storage</code> primary when available, with compatible GM/local fallback. Selecting this safely migrates current companion data to legacy GM storage and uses it first.</span></label>`);
+        const dailyAlertSettings = section("Daily Company alerts", `<div class="ncc-grid ncc-grid-2"><label class="ncc-check"><input id="ncc-daily-tick-toasts" type="checkbox" ${settings.dailyTickToasts ? "checked" : ""}><span><b>Show daily-tick toasts</b><br>Opt in to visible 18:00 UTC income/profit/customer and 18:10 UTC employee-effectiveness alert toasts. Disabled by default.</span></label><label class="ncc-check"><input id="ncc-daily-tick-notifications" type="checkbox" ${settings.dailyTickNotifications ? "checked" : ""}><span><b>Show daily-tick notifications</b><br>Opt in to desktop/native notifications. In TornPDA this also schedules the next 18:00 and 18:10 background reminders. Disabled by default.</span></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save daily alert choices</button></div>`);
         const backupRestore = section("Backup & restore", `<label class="ncc-check"><input id="ncc-backup-include-keys" type="checkbox"><span><b>Include API keys in this backup</b><br>Unchecked by default. Key values are never displayed, logged, or included unless you select this box for this one download.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="download-company-backup">Download local Company backup</button><button class="ncc-button" data-action="choose-company-backup">Choose backup JSON to restore</button><input id="ncc-company-backup-file" type="file" accept="application/json,.json" style="display:none"></div><p class="ncc-note">Backups include local snapshots, history, rankings, projections, planner, layout, settings, and alert state. Restore validates the versioned Company-only file before asking for confirmation. API keys stay out unless you opt in both when creating and when restoring a key-containing backup.</p>`);
-        return `${dataNotice()}${section("API keys", `<div class="ncc-grid ncc-grid-2"><label><span class="ncc-label">Torn API key</span><input id="ncc-torn-key" class="ncc-input" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.tornKey)}" placeholder="16-character Torn API key" style="width:100%;margin-top:6px"></label><label><span class="ncc-label">TornStats API key</span><input id="ncc-tornstats-key" class="ncc-input" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.tornStatsKey)}" placeholder="Optional; required for projections" style="width:100%;margin-top:6px"></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save settings only</button><button class="ncc-button" data-action="verify-refresh" title="Saves keys, then reloads Torn profile, employees, stock, funds news, and applications">Save keys & refresh Torn data</button></div><p class="ncc-note">Keys are stored only in your local userscript manager storage. They are not included in this repository, exports, or status messages.</p>`)}${section("TornStats projection consent", `<label class="ncc-check"><input id="ncc-projection-consent" type="checkbox" ${settings.projectionConsent ? "checked" : ""}><span><b>Allow per-employee efficiency projections.</b><br>TornStats will receive each employee’s Manual labor, Intelligence, and Endurance values with your TornStats key to calculate role efficiency. Enable this only if you are comfortable sending those work-stat triplets to TornStats.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button" data-action="save-settings">Save consent choice</button><button class="ncc-button ncc-primary" data-action="load-projections" title="Calls TornStats for each employee to rebuild selectable role-efficiency projections" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button></div>`)}${section("Calculation & refresh", `<div class="ncc-grid ncc-grid-2"><label class="ncc-check"><input id="ncc-stock-cost" type="checkbox" ${settings.includeStockCost ? "checked" : ""}><span><b>Include sold stock cost in daily net.</b><br>Daily net subtracts cost × sold amount; weekly net follows Torn Company Assistant’s wage/advertising formula because stock is reported as a daily value.</span></label><label><span class="ncc-label">Automatic core refresh</span><div class="ncc-inline" style="margin-top:6px"><input id="ncc-refresh-minutes" class="ncc-input" type="number" min="2" max="120" value="${clamp(asNumber(settings.autoRefreshMinutes, 10), 2, 120)}" style="width:85px"><span class="ncc-help">minutes while Torn is open</span></div></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save preferences only</button><button class="ncc-button" data-action="reset-layout">Reset panel position</button></div>`)}${runtimeStorage}${backupRestore}${section("Local data", `<div class="ncc-inline"><button class="ncc-button" data-action="export-history" ${companyHistory().length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="clear-local-data">Clear companion data</button></div><p class="ncc-note">Clearing companion data deletes local cache, rankings, efficiency projections, history, assignments, and saved keys from this userscript. It cannot change Torn or TornStats data.</p>`)}<p class="ncc-note">Naughty Company Companion ${VERSION} · TornPDA/Tampermonkey compatible.</p>`;
+        return `${dataNotice()}${section("API keys", `<div class="ncc-grid ncc-grid-2"><label><span class="ncc-label">Torn API key</span><input id="ncc-torn-key" class="ncc-input" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.tornKey)}" placeholder="16-character Torn API key" style="width:100%;margin-top:6px"></label><label><span class="ncc-label">TornStats API key</span><input id="ncc-tornstats-key" class="ncc-input" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(settings.tornStatsKey)}" placeholder="Optional; required for projections" style="width:100%;margin-top:6px"></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save settings only</button><button class="ncc-button" data-action="verify-refresh" title="Saves keys, then reloads Torn profile, employees, stock, funds news, and applications">Save keys & refresh Torn data</button></div><p class="ncc-note">Keys are stored only in your local userscript manager storage. They are not included in this repository, exports, or status messages.</p>`)}${section("TornStats projection consent", `<label class="ncc-check"><input id="ncc-projection-consent" type="checkbox" ${settings.projectionConsent ? "checked" : ""}><span><b>Allow per-employee efficiency projections.</b><br>TornStats will receive each employee’s Manual labor, Intelligence, and Endurance values with your TornStats key to calculate role efficiency. Enable this only if you are comfortable sending those work-stat triplets to TornStats.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button" data-action="save-settings">Save consent choice</button><button class="ncc-button ncc-primary" data-action="load-projections" title="Calls TornStats for each employee to rebuild selectable role-efficiency projections" ${state.projectionLoading ? "disabled" : ""}>${state.projectionLoading ? "Calculating role projections…" : "Calculate TornStats role projections"}</button></div>`)}${section("Calculation & refresh", `<div class="ncc-grid ncc-grid-2"><label class="ncc-check"><input id="ncc-stock-cost" type="checkbox" ${settings.includeStockCost ? "checked" : ""}><span><b>Include sold stock cost in daily net.</b><br>Daily net subtracts cost × sold amount; weekly net follows Torn Company Assistant’s wage/advertising formula because stock is reported as a daily value.</span></label><label><span class="ncc-label">Automatic core refresh</span><div class="ncc-inline" style="margin-top:6px"><input id="ncc-refresh-minutes" class="ncc-input" type="number" min="2" max="120" value="${clamp(asNumber(settings.autoRefreshMinutes, 10), 2, 120)}" style="width:85px"><span class="ncc-help">minutes while Torn is open</span></div></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save preferences only</button><button class="ncc-button" data-action="reset-layout">Reset panel position</button></div>`)}${dailyAlertSettings}${runtimeStorage}${backupRestore}${section("Local data", `<div class="ncc-inline"><button class="ncc-button" data-action="export-history" ${companyHistory().length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="clear-local-data">Clear companion data</button></div><p class="ncc-note">Clearing companion data deletes local cache, rankings, efficiency projections, history, assignments, and saved keys from this userscript. It cannot change Torn or TornStats data.</p>`)}<p class="ncc-note">Naughty Company Companion ${VERSION} · TornPDA/Tampermonkey compatible.</p>`;
     }
 
     function renderHealthModal() {
@@ -2830,6 +2858,8 @@
         const tornStatsKey = document.getElementById("ncc-tornstats-key");
         const consent = document.getElementById("ncc-projection-consent");
         const stockCost = document.getElementById("ncc-stock-cost");
+        const dailyTickToasts = document.getElementById("ncc-daily-tick-toasts");
+        const dailyTickNotifications = document.getElementById("ncc-daily-tick-notifications");
         const useLegacyGMStorage = document.getElementById("ncc-use-legacy-gm-storage");
         const refreshMinutes = document.getElementById("ncc-refresh-minutes");
         await saveSettings({
@@ -2837,6 +2867,8 @@
             tornStatsKey: tornStatsKey ? tornStatsKey.value.trim() : state.settings.tornStatsKey,
             projectionConsent: consent ? consent.checked : state.settings.projectionConsent,
             includeStockCost: stockCost ? stockCost.checked : state.settings.includeStockCost,
+            dailyTickToasts: dailyTickToasts ? dailyTickToasts.checked : state.settings.dailyTickToasts,
+            dailyTickNotifications: dailyTickNotifications ? dailyTickNotifications.checked : state.settings.dailyTickNotifications,
             useLegacyGMStorage: useLegacyGMStorage ? useLegacyGMStorage.checked : state.settings.useLegacyGMStorage,
             autoRefreshMinutes: refreshMinutes ? clamp(asNumber(refreshMinutes.value, 10), 2, 120) : state.settings.autoRefreshMinutes
         });
@@ -3312,7 +3344,7 @@
         });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, formatAverageEffectiveness, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores, utf8Base64 };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, formatAverageEffectiveness, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores, utf8Base64 };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
     if (typeof document !== "undefined" && typeof window !== "undefined") {

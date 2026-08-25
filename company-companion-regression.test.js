@@ -210,6 +210,29 @@ test("daily tick alerts use independent 18:00 and 18:10 UTC phases", () => {
     assert.equal(companion.nextDailyAlertTimestamp(incomeTick), employeeTick);
 });
 
+test("daily tick toast and notification delivery are independently opt-in and persist in backups", () => {
+    assert.deepEqual(companion.dailyAlertDeliveryChannels(), { toast: false, notification: false });
+    assert.equal(companion.dailyTickAlertsEnabled(), false);
+    assert.deepEqual(companion.dailyAlertDeliveryChannels({ dailyTickToasts: true }), { toast: true, notification: false });
+    assert.deepEqual(companion.dailyAlertDeliveryChannels({ dailyTickNotifications: true }), { toast: false, notification: true });
+    assert.equal(companion.dailyTickAlertsEnabled({ dailyTickToasts: true }), true);
+    assert.equal(companion.dailyTickAlertsEnabled({ dailyTickNotifications: true }), true);
+
+    const backup = companion.createCompanyBackupDocument({
+        "ncc:settings:v1": { dailyTickToasts: true, dailyTickNotifications: true }
+    }, { includeApiKeys: false, timestamp: Date.UTC(2026, 7, 24), appVersion: "1.2.6" });
+    const restored = companion.materializeCompanyBackupStores(backup, { currentSettings: {} });
+    assert.equal(restored["ncc:settings:v1"].dailyTickToasts, true);
+    assert.equal(restored["ncc:settings:v1"].dailyTickNotifications, true);
+
+    assert.match(source, /id="ncc-daily-tick-toasts"/);
+    assert.match(source, /id="ncc-daily-tick-notifications"/);
+    assert.match(source, /if \(!dailyAlertDeliveryChannels\(\)\.toast\) return false;/);
+    assert.match(source, /if \(!dailyAlertDeliveryChannels\(\)\.notification\) return false;/);
+    assert.match(source, /if \(!dailyTickAlertsEnabled\(\)\) return false;/);
+    assert.match(source, /if \(!dailyTickAlertsEnabled\(\)\) return;/);
+});
+
 test("daily alert toasts keep full messages stacked instead of replacing one another", () => {
     const dailyToast = source.match(/async function showDailyToast[\s\S]*?\n    }\n\n    function companyPageUrl/);
     assert.ok(dailyToast);
