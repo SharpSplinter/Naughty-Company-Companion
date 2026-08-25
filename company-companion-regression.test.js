@@ -7,6 +7,7 @@ const source = fs.readFileSync(path.join(__dirname, "Naughty Company Companion.u
 const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Company-Companion/);
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Company-Companion\/main/);
+assert.match(source, /@license\s+MIT/);
 assert.doesNotMatch(source + readme, /xf4k31tx/);
 
 const company = (id, weekly, rating, daily = weekly / 7) => ({
