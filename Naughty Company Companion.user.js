@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.2.7
+// @version      1.2.8
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -27,7 +27,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.7";
+    const VERSION = "1.2.8";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -55,6 +55,8 @@
     const EFFECTIVENESS_ALERT_THRESHOLD = -12;
     const COMPACT_LAYOUT_MAX_WIDTH = 820;
     const PANEL_MARGIN = 14;
+    const VIRTUAL_KEYBOARD_MIN_HEIGHT_DELTA = 120;
+    const VIRTUAL_KEYBOARD_WIDTH_TOLERANCE = 0.12;
     const STORAGE_WRITE_DEBOUNCE_MS = 120;
     const BACKUP_FORMAT = "naughty-company-companion-backup";
     const BACKUP_NAMESPACE = "naughty-company-companion";
@@ -146,6 +148,12 @@
         isTornPDA: false,
         confirmationComplete: false,
         confirmationPromise: null
+    };
+    const keyboardViewportRuntime = {
+        active: false,
+        baseline: null,
+        panelHeight: null,
+        releaseTimer: null
     };
 
     const asNumber = (value, fallback = 0) => {
@@ -1996,6 +2004,134 @@
         };
     }
 
+    function isVirtualKeyboardViewportChange({ focused = false, baseline, current, layoutHeight = 0 } = {}) {
+        const baselineWidth = asNumber(baseline?.width);
+        const baselineHeight = asNumber(baseline?.height);
+        const currentWidth = asNumber(current?.width);
+        const currentHeight = asNumber(current?.height);
+        if (!focused || !baselineWidth || !baselineHeight || !currentWidth || !currentHeight) return false;
+        const widthTolerance = Math.max(48, Math.round(baselineWidth * VIRTUAL_KEYBOARD_WIDTH_TOLERANCE));
+        if (Math.abs(currentWidth - baselineWidth) > widthTolerance) return false;
+        const heightLoss = baselineHeight - currentHeight;
+        const layoutGap = Math.max(0, asNumber(layoutHeight) - currentHeight);
+        return heightLoss >= Math.max(VIRTUAL_KEYBOARD_MIN_HEIGHT_DELTA, Math.round(baselineHeight * 0.18))
+            || layoutGap >= VIRTUAL_KEYBOARD_MIN_HEIGHT_DELTA;
+    }
+
+    function isMobileKeyboardRuntime() {
+        const userAgent = currentUserAgent();
+        return nativeRuntime.isTornPDA || tornPdaUserAgent(userAgent) || /Android|iP(?:hone|ad|od)|Mobile/i.test(userAgent);
+    }
+
+    function enableNativeKeyboardOverlay() {
+        if (!isMobileKeyboardRuntime()) return false;
+        try {
+            const keyboard = typeof navigator === "undefined" ? null : navigator.virtualKeyboard;
+            if (!keyboard) return false;
+            keyboard.overlaysContent = true;
+            return keyboard.overlaysContent === true;
+        } catch {
+            return false;
+        }
+    }
+
+    function isCompanionTextEntry(element) {
+        const root = document.getElementById(ROOT_ID);
+        if (!root || !element || !root.contains(element) || element.disabled || element.readOnly) return false;
+        const tagName = String(element.tagName || "").toLowerCase();
+        if (tagName === "textarea" || element.isContentEditable) return true;
+        if (tagName !== "input") return false;
+        return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(String(element.type || "text").toLowerCase());
+    }
+
+    function activeCompanionTextEntry() {
+        return isCompanionTextEntry(document.activeElement) ? document.activeElement : null;
+    }
+
+    function rememberStableViewport(viewport = visibleViewport()) {
+        if (keyboardViewportRuntime.active) return;
+        keyboardViewportRuntime.baseline = { width: asNumber(viewport.width), height: asNumber(viewport.height) };
+        const panelHeight = asNumber(panel()?.getBoundingClientRect().height);
+        if (panelHeight > 0) keyboardViewportRuntime.panelHeight = Math.round(panelHeight);
+    }
+
+    function lockKeyboardViewportOverlay() {
+        const root = document.getElementById(ROOT_ID);
+        const el = panel();
+        if (!root || !el) return;
+        const rect = el.getBoundingClientRect();
+        const fallbackHeight = Math.max(1, asNumber(keyboardViewportRuntime.baseline?.height) - 8);
+        const frozenHeight = asNumber(keyboardViewportRuntime.panelHeight) || Math.round(rect.height) || fallbackHeight;
+        root.style.setProperty("--ncc-keyboard-panel-height", String(Math.max(1, frozenHeight)) + "px");
+        root.setAttribute("data-virtual-keyboard-open", "true");
+        keyboardViewportRuntime.active = true;
+    }
+
+    function releaseKeyboardViewportOverlay() {
+        const root = document.getElementById(ROOT_ID);
+        root?.removeAttribute("data-virtual-keyboard-open");
+        root?.style.removeProperty("--ncc-keyboard-panel-height");
+        keyboardViewportRuntime.active = false;
+    }
+
+    function handleVirtualKeyboardFocus(event) {
+        if (!isMobileKeyboardRuntime() || !isCompanionTextEntry(event.target)) return;
+        if (keyboardViewportRuntime.releaseTimer) {
+            window.clearTimeout(keyboardViewportRuntime.releaseTimer);
+            keyboardViewportRuntime.releaseTimer = null;
+        }
+        if (!keyboardViewportRuntime.baseline) rememberStableViewport();
+    }
+
+    function handleVirtualKeyboardFocusOut() {
+        if (!isMobileKeyboardRuntime()) return;
+        if (keyboardViewportRuntime.releaseTimer) window.clearTimeout(keyboardViewportRuntime.releaseTimer);
+        keyboardViewportRuntime.releaseTimer = window.setTimeout(() => {
+            keyboardViewportRuntime.releaseTimer = null;
+            if (activeCompanionTextEntry()) return;
+            const priorMode = state.runtimeMode;
+            const wasActive = keyboardViewportRuntime.active;
+            releaseKeyboardViewportOverlay();
+            rememberStableViewport();
+            if (wasActive) {
+                applyLayout();
+                if (priorMode !== state.runtimeMode) render();
+            }
+        }, 160);
+    }
+
+    function bindVirtualKeyboardViewportGuard() {
+        const root = document.getElementById(ROOT_ID);
+        if (!root) return;
+        enableNativeKeyboardOverlay();
+        root.addEventListener("focusin", handleVirtualKeyboardFocus);
+        root.addEventListener("focusout", handleVirtualKeyboardFocusOut);
+        rememberStableViewport();
+    }
+
+    function handleRuntimeViewportChange() {
+        const priorMode = state.runtimeMode;
+        const viewport = visibleViewport();
+        const focused = activeCompanionTextEntry();
+        const baseline = keyboardViewportRuntime.baseline || viewport;
+        const widthTolerance = Math.max(48, Math.round(asNumber(baseline.width) * VIRTUAL_KEYBOARD_WIDTH_TOLERANCE));
+        const widthChanged = Math.abs(asNumber(viewport.width) - asNumber(baseline.width)) > widthTolerance;
+        if (isMobileKeyboardRuntime() && isVirtualKeyboardViewportChange({
+            focused: Boolean(focused),
+            baseline,
+            current: viewport,
+            layoutHeight: window.innerHeight
+        })) {
+            lockKeyboardViewportOverlay();
+            return;
+        }
+        const wasActive = keyboardViewportRuntime.active;
+        if (wasActive) releaseKeyboardViewportOverlay();
+        if (!focused || wasActive || widthChanged) rememberStableViewport(viewport);
+        applyLayout();
+        if (priorMode !== state.runtimeMode) render();
+    }
+
     function boundedPanelLayout(layout = DEFAULT_LAYOUT, { width = 1024, height = 768, margin = PANEL_MARGIN } = {}) {
         const viewportWidth = Math.max(1, asNumber(width, 1024));
         const viewportHeight = Math.max(1, asNumber(height, 768));
@@ -2064,6 +2200,7 @@
     function applyRuntimeMode() {
         const mode = currentRuntimeMode();
         state.runtimeMode = mode;
+        if (mode === "mobile") enableNativeKeyboardOverlay();
         document.getElementById(ROOT_ID)?.setAttribute("data-runtime", mode);
         return mode;
     }
@@ -2072,6 +2209,7 @@
         const el = panel();
         const launcher = document.getElementById("ncc-launcher");
         if (!el || !launcher) return;
+        if (keyboardViewportRuntime.active && !state.layout.minimized) return;
         const mode = applyRuntimeMode();
         const viewport = visibleViewport();
         const layout = boundedPanelLayout(state.layout, viewport);
@@ -2099,6 +2237,7 @@
         el.classList.toggle("ncc-hidden", Boolean(layout.minimized));
         launcher.classList.toggle("ncc-hidden", !layout.minimized);
         applyCompactLayout(mode);
+        rememberStableViewport(viewport);
     }
 
     async function persistLayout() {
@@ -2357,6 +2496,7 @@
                 #${ROOT_ID}[data-compact-layout="true"] .ncc-trend-detail .ncc-kv { grid-template-columns:minmax(0,1fr); gap:3px; }
                 #${ROOT_ID}[data-compact-layout="true"] .ncc-trend-detail .ncc-kv span:last-child { overflow-wrap:anywhere; text-align:left; white-space:normal; }
                 #${ROOT_ID}[data-runtime="mobile"] #ncc-panel { inset:max(4px, env(safe-area-inset-top)) 4px max(4px, env(safe-area-inset-bottom)) 4px !important; width:auto !important; height:auto !important; min-width:0; min-height:0; border-radius:11px; resize:none; }
+                #${ROOT_ID}[data-runtime="mobile"][data-virtual-keyboard-open="true"] #ncc-panel { inset:max(4px, env(safe-area-inset-top)) 4px auto 4px !important; height:var(--ncc-keyboard-panel-height) !important; max-height:none !important; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-resize-grip { display:none; }
                 #${ROOT_ID}[data-runtime="mobile"] #ncc-launcher { top:max(10px, env(safe-area-inset-top)); right:10px; }
                 #${ROOT_ID}[data-runtime="mobile"] .ncc-head { min-height:54px; }
@@ -2393,6 +2533,7 @@
             <aside id="ncc-alert-toasts" aria-live="polite" aria-label="Company alerts"></aside>`;
         document.body.append(root);
         bindLauncherInteractions();
+        bindVirtualKeyboardViewportGuard();
         bindDragAndResize();
         applyLayout();
     }
@@ -3382,13 +3523,8 @@
             grip.addEventListener("lostpointercapture", endResize);
         });
         el.addEventListener("pointerup", () => { void persistLayout(); });
-        const handleRuntimeResize = () => {
-            const priorMode = state.runtimeMode;
-            applyLayout();
-            if (priorMode !== state.runtimeMode) render();
-        };
-        window.addEventListener("resize", handleRuntimeResize);
-        window.visualViewport?.addEventListener("resize", handleRuntimeResize);
+        window.addEventListener("resize", handleRuntimeViewportChange);
+        window.visualViewport?.addEventListener("resize", handleRuntimeViewportChange);
     }
 
     function resetAutoRefresh() {
@@ -3443,7 +3579,7 @@
         });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, formatAverageEffectiveness, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, boundedLauncherLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores, utf8Base64 };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, formatAverageEffectiveness, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, boundedLauncherLayout, runtimeMode, isVirtualKeyboardViewportChange, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores, utf8Base64 };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
     if (typeof document !== "undefined" && typeof window !== "undefined") {

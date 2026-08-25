@@ -197,6 +197,39 @@ test("runtime mode separates native TornPDA confirmation from compact viewport d
     assert.equal(companion.runtimeMode({ width: 1200, height: 800, scale: 1 }), "desktop");
 });
 
+test("virtual keyboard guard preserves focused mobile panels without swallowing orientation changes", () => {
+    const baseline = { width: 390, height: 844 };
+    assert.equal(companion.isVirtualKeyboardViewportChange({
+        focused: true,
+        baseline,
+        current: { width: 390, height: 420 },
+        layoutHeight: 844
+    }), true);
+    assert.equal(companion.isVirtualKeyboardViewportChange({
+        focused: true,
+        baseline,
+        current: { width: 844, height: 390 },
+        layoutHeight: 390
+    }), false);
+    assert.equal(companion.isVirtualKeyboardViewportChange({
+        focused: false,
+        baseline,
+        current: { width: 390, height: 420 },
+        layoutHeight: 844
+    }), false);
+    assert.equal(companion.isVirtualKeyboardViewportChange({
+        focused: true,
+        baseline,
+        current: { width: 390, height: 790 },
+        layoutHeight: 844
+    }), false);
+    assert.match(source, /bindVirtualKeyboardViewportGuard\(\)/);
+    assert.match(source, /navigator\.virtualKeyboard/);
+    assert.match(source, /keyboard\.overlaysContent = true/);
+    assert.match(source, /data-virtual-keyboard-open="true"/);
+    assert.match(source, /max-height:none !important/);
+});
+
 test("daily tick alerts use independent 18:00 and 18:10 UTC phases", () => {
     const beforeTick = Date.UTC(2026, 7, 24, 17, 59, 59);
     const incomeTick = Date.UTC(2026, 7, 24, 18, 0, 0);
