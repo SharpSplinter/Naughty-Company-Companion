@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.2.6
+// @version      1.2.7
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -27,7 +27,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.6";
+    const VERSION = "1.2.7";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const TORNSTATS_API = "https://www.tornstats.com/api/v2";
@@ -90,7 +90,8 @@
         positionCapacities: {},
         positionPriority: {}
     };
-    const DEFAULT_LAYOUT = { x: null, y: 14, width: 940, height: 860, minimized: false };
+    const DEFAULT_LAYOUT = { x: null, y: 14, width: 940, height: 860, minimized: false, launcherX: null, launcherY: null };
+    const LAUNCHER_SIZE = 52;
     const state = {
         settings: { ...DEFAULT_SETTINGS },
         layout: { ...DEFAULT_LAYOUT },
@@ -2015,6 +2016,21 @@
         };
     }
 
+    function boundedLauncherLayout(layout = DEFAULT_LAYOUT, { width = 1024, height = 768, margin = PANEL_MARGIN, size = LAUNCHER_SIZE } = {}) {
+        const viewportWidth = Math.max(1, asNumber(width, 1024));
+        const viewportHeight = Math.max(1, asNumber(height, 768));
+        const launcherSize = Math.max(1, Math.min(asNumber(size, LAUNCHER_SIZE), viewportWidth, viewportHeight));
+        const safeMargin = Math.max(0, Math.min(asNumber(margin, PANEL_MARGIN), Math.floor(Math.min(viewportWidth, viewportHeight) / 4)));
+        const maxX = Math.max(safeMargin, viewportWidth - launcherSize - safeMargin);
+        const maxY = Math.max(safeMargin, viewportHeight - launcherSize - safeMargin);
+        return {
+            x: layout?.launcherX === null || layout?.launcherX === undefined ? null : clamp(Math.round(asNumber(layout.launcherX)), safeMargin, maxX),
+            y: layout?.launcherY === null || layout?.launcherY === undefined ? null : clamp(Math.round(asNumber(layout.launcherY)), safeMargin, maxY),
+            margin: safeMargin,
+            size: launcherSize
+        };
+    }
+
     function applyCompactLayout(mode) {
         const root = document.getElementById(ROOT_ID);
         const el = panel();
@@ -2057,7 +2073,9 @@
         const launcher = document.getElementById("ncc-launcher");
         if (!el || !launcher) return;
         const mode = applyRuntimeMode();
-        const layout = boundedPanelLayout(state.layout, visibleViewport());
+        const viewport = visibleViewport();
+        const layout = boundedPanelLayout(state.layout, viewport);
+        const launcherLayout = boundedLauncherLayout(state.layout, { ...viewport, margin: mode === "mobile" ? 10 : 18 });
         el.style.width = `${layout.width}px`;
         el.style.height = `${layout.height}px`;
         if (layout.x === null) {
@@ -2068,6 +2086,14 @@
             el.style.right = "auto";
         }
         el.style.top = `${layout.y}px`;
+        if (launcherLayout.x === null) {
+            launcher.style.left = "auto";
+            launcher.style.right = `${launcherLayout.margin}px`;
+        } else {
+            launcher.style.left = `${launcherLayout.x}px`;
+            launcher.style.right = "auto";
+        }
+        launcher.style.top = `${launcherLayout.y === null ? launcherLayout.margin : launcherLayout.y}px`;
         el.classList.toggle("ncc-compact", mode === "mobile");
         launcher.classList.toggle("ncc-compact", mode === "mobile");
         el.classList.toggle("ncc-hidden", Boolean(layout.minimized));
@@ -2089,6 +2115,78 @@
         await storeSet(STORE.layout, state.layout, { immediate: true });
     }
 
+    async function persistLauncherPosition() {
+        const launcher = document.getElementById("ncc-launcher");
+        if (!launcher) return;
+        const rect = launcher.getBoundingClientRect();
+        const mode = currentRuntimeMode();
+        const launcherLayout = boundedLauncherLayout({ ...state.layout, launcherX: rect.left, launcherY: rect.top }, {
+            ...visibleViewport(),
+            margin: mode === "mobile" ? 10 : 18,
+            size: Math.max(rect.width, rect.height, LAUNCHER_SIZE)
+        });
+        state.layout = { ...state.layout, launcherX: launcherLayout.x, launcherY: launcherLayout.y };
+        await storeSet(STORE.layout, state.layout, { immediate: true });
+    }
+
+    function bindLauncherInteractions() {
+        const launcher = document.getElementById("ncc-launcher");
+        if (!launcher || launcher.dataset.bound) return;
+        launcher.dataset.bound = "true";
+        let drag = null;
+        let suppressClickUntil = 0;
+        const finishDrag = async () => {
+            if (!drag) return;
+            const moved = drag.moved;
+            drag = null;
+            if (!moved) return;
+            suppressClickUntil = Date.now() + 500;
+            await persistLauncherPosition();
+        };
+        launcher.addEventListener("pointerdown", (event) => {
+            if (event.button !== 0) return;
+            const rect = launcher.getBoundingClientRect();
+            drag = {
+                startX: event.clientX,
+                startY: event.clientY,
+                dx: event.clientX - rect.left,
+                dy: event.clientY - rect.top,
+                moved: false
+            };
+            launcher.setPointerCapture?.(event.pointerId);
+        });
+        launcher.addEventListener("pointermove", (event) => {
+            if (!drag) return;
+            const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+            if (!drag.moved && distance < 5) return;
+            drag.moved = true;
+            const mode = currentRuntimeMode();
+            const launcherLayout = boundedLauncherLayout({
+                ...state.layout,
+                launcherX: Math.round(event.clientX - drag.dx),
+                launcherY: Math.round(event.clientY - drag.dy)
+            }, {
+                ...visibleViewport(),
+                margin: mode === "mobile" ? 10 : 18,
+                size: Math.max(launcher.getBoundingClientRect().width, launcher.getBoundingClientRect().height, LAUNCHER_SIZE)
+            });
+            state.layout = { ...state.layout, launcherX: launcherLayout.x, launcherY: launcherLayout.y };
+            applyLayout();
+            event.preventDefault();
+        });
+        launcher.addEventListener("pointerup", () => { void finishDrag(); });
+        launcher.addEventListener("pointercancel", () => { void finishDrag(); });
+        launcher.addEventListener("lostpointercapture", () => { void finishDrag(); });
+        launcher.addEventListener("click", (event) => {
+            if (Date.now() < suppressClickUntil) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+            void toggleMinimized(false);
+        });
+    }
+
     function mountShell() {
         if (document.getElementById(ROOT_ID)) return;
         const root = document.createElement("div");
@@ -2102,7 +2200,8 @@
                 .ncc-alert-toast { max-height:min(48vh,360px); overflow:auto; padding:11px 13px; border:1px solid #397866; border-radius:10px; background:#123e37; box-shadow:0 14px 36px #000a; color:#ecfff7; font-size:12px; font-weight:650; line-height:1.4; white-space:pre-wrap; pointer-events:auto; cursor:pointer; }
                 .ncc-alert-toast.bad { border-color:#9d4651; background:#4b222b; color:#fff0f1; }
                 .ncc-alert-toast.warn { border-color:#987229; background:#44361c; color:#fff3d1; }
-                #ncc-launcher { position:fixed; right:18px; top:18px; z-index:2147483646; width:52px; height:52px; border:1px solid #54dfbd; border-radius:17px; background:linear-gradient(145deg,#123e45,#122639); color:#dffcf4; box-shadow:0 12px 34px #0009; font-size:24px; cursor:pointer; }
+                #ncc-launcher { position:fixed; right:18px; top:18px; z-index:2147483646; width:52px; height:52px; border:1px solid #54dfbd; border-radius:17px; background:linear-gradient(145deg,#123e45,#122639); color:#dffcf4; box-shadow:0 12px 34px #0009; font-size:24px; cursor:grab; touch-action:none; user-select:none; }
+                #ncc-launcher:active { cursor:grabbing; }
                 #ncc-panel { position:fixed; z-index:2147483646; display:flex; flex-direction:column; overflow:hidden; min-width:430px; min-height:420px; max-width:calc(100vw - 8px); max-height:calc(100vh - 8px); border:1px solid #34516a; border-radius:16px; background:linear-gradient(150deg,#0d1a29 0%,#0a1421 60%,#101927 100%); color:#dbe7f4; box-shadow:0 18px 55px #000b; resize:none; }
                 #ncc-panel.ncc-hidden, #ncc-launcher.ncc-hidden { display:none; }
                 .ncc-resize-grip { position:absolute; z-index:4; bottom:0; width:24px; height:24px; margin:0; padding:0; border:0; background:transparent; touch-action:none; }
@@ -2277,7 +2376,7 @@
                 @media (max-width: 820px) { .ncc-grid, .ncc-grid.ncc-grid-3 { grid-template-columns:repeat(2,minmax(0,1fr)); } .ncc-summary-strip { grid-template-columns:repeat(3,minmax(120px,1fr)); } .ncc-team-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
                 @media (max-width: 680px) { #ncc-panel { inset:max(4px, env(safe-area-inset-top)) 4px max(4px, env(safe-area-inset-bottom)) 4px !important; width:auto !important; height:auto !important; min-width:0; min-height:0; border-radius:11px; resize:none; } #ncc-launcher { top:max(10px, env(safe-area-inset-top)); right:10px; } .ncc-resize-grip { display:none; } .ncc-head { min-height:54px; } .ncc-grid, .ncc-grid.ncc-grid-2 { grid-template-columns:1fr; } .ncc-card { min-height:73px; } .ncc-value { font-size:18px; } #ncc-content { padding:9px; } .ncc-table { white-space:normal; } .ncc-table th, .ncc-table td { padding:8px 6px; } .ncc-input[type="search"] { min-width:130px; flex:1; } .ncc-summary-strip { grid-template-columns:repeat(2,minmax(120px,1fr)); } .ncc-team-grid { grid-template-columns:1fr; } .ncc-team-card { min-height:96px; } .ncc-team-select { width:60%; } .ncc-refresh-button { width:29px; padding:0; } .ncc-refresh-label { display:none; } }
             </style>
-            <button id="ncc-launcher" class="ncc-hidden" type="button" aria-label="Open Naughty Company Companion">♜</button>
+            <button id="ncc-launcher" class="ncc-hidden" type="button" aria-label="Open Naughty Company Companion" title="Tap to open. Drag to move.">♜</button>
             <section id="ncc-panel" aria-label="Naughty Company Companion">
                 <header class="ncc-head" id="ncc-drag-handle">
                     <div class="ncc-brand"><strong>Naughty Company Companion</strong><small id="ncc-status">Loading…</small></div>
@@ -2293,7 +2392,7 @@
             </section>
             <aside id="ncc-alert-toasts" aria-live="polite" aria-label="Company alerts"></aside>`;
         document.body.append(root);
-        document.getElementById("ncc-launcher").addEventListener("click", () => toggleMinimized(false));
+        bindLauncherInteractions();
         bindDragAndResize();
         applyLayout();
     }
@@ -3344,7 +3443,7 @@
         });
     }
 
-    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, formatAverageEffectiveness, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores, utf8Base64 };
+    const testApi = { reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials, statFingerprint, projectionBlock, assignProjectedRows, stockDifference, previousStockSnapshot, totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency, formatAverageEffectiveness, sortRows, orderedPriorityPositions, trendNumber, trendChartAvailability, trendPointTooltip, trendPerformance, isCompactViewport, isCompactLayout, boundedPanelLayout, boundedLauncherLayout, runtimeMode, utcDayKey, dailyAlertPhaseTime, isDailyAlertDue, rankingRefreshDay, isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert, employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp, dailyAlertKindAt, nextDailyReminderTimestamp, buildDailyTickReminder, dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument, materializeCompanyBackupStores, utf8Base64 };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
     if (typeof document !== "undefined" && typeof window !== "undefined") {

@@ -452,6 +452,16 @@ test("compact responsive layout uses actual panel width and keeps bounds inside 
     assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= 600);
 });
 
+test("minimized launcher restores from any tap and persists its independently dragged position", () => {
+    const bounds = companion.boundedLauncherLayout({ launcherX: 900, launcherY: 700 }, { width: 300, height: 200, margin: 10, size: 52 });
+    assert.deepEqual(bounds, { x: 238, y: 138, margin: 10, size: 52 });
+    assert.match(source, /DEFAULT_LAYOUT = \{ x: null, y: 14, width: 940, height: 860, minimized: false, launcherX: null, launcherY: null \}/);
+    assert.match(source, /function bindLauncherInteractions\(\)/);
+    assert.match(source, /await persistLauncherPosition\(\)/);
+    assert.match(source, /launcher\.addEventListener\("click", \(event\) => \{[\s\S]*void toggleMinimized\(false\)/);
+    assert.match(source, /state\.layout = \{ \.\.\.state\.layout, launcherX: launcherLayout\.x, launcherY: launcherLayout\.y \}/);
+});
+
 test("compact Company tables stack into labeled cards and tabs wrap without horizontal scrolling", () => {
     assert.match(source, /data-compact-layout="true"\] \.ncc-tabs \{ display:grid; grid-template-columns:repeat\(4,minmax\(0,1fr\)\); overflow:visible;/);
     assert.match(source, /data-compact-layout="true"\] \.ncc-stack-wrap \{ overflow:visible;/);

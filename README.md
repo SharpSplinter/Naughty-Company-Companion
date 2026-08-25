@@ -42,7 +42,7 @@ The project is an independent community userscript. It is not affiliated with To
 - Explicit refresh labels explaining which data will be loaded.
 - Persistent panel position, size, selected tab, plans, capacities, priorities, and local history.
 - Explicit TornPDA/user-agent and effective viewport/scale detection. The mobile runtime activates at an effective width ≤700px, effective height ≤520px, or scale >1.1 at ≤960px; responsive reflow also activates whenever the actual panel/visible viewport is ≤820px. Team uses a detailed top-to-bottom list on desktop and compact cards in TornPDA or compact mode.
-- Desktop drag/resize/minimize controls and a safe mobile TornPDA layout.
+- Desktop drag/resize/minimize controls and a safe mobile TornPDA layout. The minimized launcher opens from any tap/click and can be dragged to a remembered position without changing the expanded panel’s placement.
 
 ## Installation
 
