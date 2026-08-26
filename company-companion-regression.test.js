@@ -650,7 +650,7 @@ test("Company backup v2 isolates company keys and migrates legacy single-company
         },
         "ncc:history:v1": { company: [{ period: 1 }] },
         "ncc:cache:v1": { companies: { 101: { profile: { id: 101 } }, 202: { profile: { id: 202 } } } }
-    }, { includeApiKeys: false, timestamp: Date.UTC(2026, 7, 24), appVersion: "1.3.0" });
+    }, { includeApiKeys: false, timestamp: Date.UTC(2026, 7, 24), appVersion: "1.3.1" });
 
     assert.equal(backup.schemaVersion, 2);
     assert.equal(backup.includesApiKeys, false);
@@ -679,7 +679,7 @@ test("Company backup v2 isolates company keys and migrates legacy single-company
                 202: { id: 202, key: "replace-b" }
             }
         }
-    }, { includeApiKeys: true, timestamp: Date.UTC(2026, 7, 24), appVersion: "1.3.0" });
+    }, { includeApiKeys: true, timestamp: Date.UTC(2026, 7, 24), appVersion: "1.3.1" });
     const keylessRestore = companion.materializeCompanyBackupStores(keyBackup, {
         currentSettings: { companyAccounts: { 101: { id: 101, key: "keep-a" } } }
     });
