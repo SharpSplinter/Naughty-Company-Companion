@@ -16,7 +16,7 @@ The project is an independent community userscript. It is not affiliated with To
 
 - Torn-reported daily and weekly income.
 - Daily and weekly profit plus 30-day tracked or forecast income/profit figures.
-- Company condition, funds, ad budget, trains, applications, and recent funds news when the API key can access them.
+- Company condition, funds, ad budget, trains, application status counts (Pending, Accepted, and Withdrawn), and recent funds news when the API key can access them.
 - Same-type income rank, transparent health score, observed next-star gap, and previous-star buffer.
 
 ### Team and planner

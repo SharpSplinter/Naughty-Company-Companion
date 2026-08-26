@@ -88,6 +88,23 @@ test("daily net remains unavailable when required stock cost is unavailable", ()
     assert.equal(result.weeklyProfit, 4900);
 });
 
+test("applications report their actual Pending, Accepted, and Withdrawn status counts", () => {
+    assert.deepEqual(companion.applicationStatusSummary([
+        { status: "accepted" },
+        { status: "Accepted" },
+        { status: "withdrawn" },
+        { status: "withdrawn" },
+        { status: "withdrawn" }
+    ]), { pending: 0, accepted: 2, withdrawn: 3, other: 0, total: 5 });
+    assert.deepEqual(companion.applicationStatusSummary([{ status: "pending" }, { status: "expired" }]), {
+        pending: 1, accepted: 0, withdrawn: 0, other: 1, total: 2
+    });
+    assert.match(source, /applicationsAvailable: applicationsResult\.status === "fulfilled"/);
+    assert.match(source, /\$\{formatNumber\(applicationSummary\.pending\)\} Pending/);
+    assert.match(source, /\$\{formatNumber\(applicationSummary\.accepted\)\} Accepted/);
+    assert.match(source, /\$\{formatNumber\(applicationSummary\.withdrawn\)\} Withdrawn/);
+});
+
 test("local Oil Rig calculator matches the verified Torn total-efficiency vectors", () => {
     const secretary = { intelligence: 56250, endurance: 112500 };
     const rnelody = {
@@ -582,6 +599,16 @@ test("minimized launcher restores from any tap and persists its independently dr
     assert.match(source, /state\.layout = \{ \.\.\.state\.layout, launcherX: launcherLayout\.x, launcherY: launcherLayout\.y \}/);
     assert.equal(companion.launcherTapActivates({ x: 40, y: 40 }, { x: 46, y: 45 }), true);
     assert.equal(companion.launcherTapActivates({ x: 40, y: 40 }, { x: 49, y: 40 }), false);
+});
+
+test("Company selector remains tappable while the rest of the header can still drag", () => {
+    const selectTarget = { closest: (selector) => selector.includes("select") ? {} : null };
+    const titleTarget = { closest: () => null };
+    assert.equal(companion.canStartHeaderDrag(selectTarget, 0), false);
+    assert.equal(companion.canStartHeaderDrag(titleTarget, 0), true);
+    assert.equal(companion.canStartHeaderDrag(titleTarget, 2), false);
+    assert.match(source, /#ncc-company-selector \{[^}]*touch-action:manipulation;/);
+    assert.match(source, /if \(!canStartHeaderDrag\(event\.target, event\.button\)\) return;/);
 });
 
 test("compact Company tables stack into labeled cards and tabs wrap without horizontal scrolling", () => {

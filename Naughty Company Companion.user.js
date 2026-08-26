@@ -2237,6 +2237,7 @@
                 stockAvailable: stockResult.status === "fulfilled",
                 news: Array.isArray(resultValue(newsResult, "news", [])) ? resultValue(newsResult, "news", []) : [],
                 applications: Array.isArray(resultValue(applicationsResult, "applications", [])) ? resultValue(applicationsResult, "applications", []) : [],
+                applicationsAvailable: applicationsResult.status === "fulfilled",
                 fetchedAt: now
             },
             messages,
@@ -2886,7 +2887,7 @@
                 .ncc-brand strong { display:block; color:#dffcf4; font-size:13px; letter-spacing:.03em; }
                 .ncc-brand small { display:block; max-width:510px; overflow-wrap:anywhere; color:#94a8ba; font-size:10px; }
                 .ncc-head-actions { display:flex; gap:6px; cursor:default; }
-                #ncc-company-selector { width:min(260px,100%); margin-top:5px; min-height:27px; font-size:10px; }
+                #ncc-company-selector { width:min(260px,100%); margin-top:5px; min-height:27px; cursor:pointer; touch-action:manipulation; user-select:auto; -webkit-user-select:auto; font-size:10px; }
                 .ncc-icon { width:29px; height:29px; border:1px solid #39546b; border-radius:8px; background:#132337; color:#bcd0df; cursor:pointer; font-size:14px; }
                 .ncc-refresh-button { min-height:29px; padding:5px 8px; }
                 .ncc-icon:hover, .ncc-tab.active, .ncc-primary:hover { border-color:#4ce0bd; color:#e5fff8; }
@@ -3094,6 +3095,22 @@
         return `<article class="ncc-card ${action ? "clickable" : ""}" ${action ? `data-action="${action}"` : ""}><span class="ncc-label">${escapeHtml(label)}</span><strong class="ncc-value ${tone}">${escapeHtml(value)}</strong><span class="ncc-sub">${escapeHtml(sub)}</span></article>`;
     }
 
+    function applicationStatusSummary(applications) {
+        const summary = { pending: 0, accepted: 0, withdrawn: 0, other: 0, total: 0 };
+        (Array.isArray(applications) ? applications : []).forEach((application) => {
+            summary.total += 1;
+            const status = String(application?.status || "").trim().toLowerCase();
+            if (status === "pending" || status === "accepted" || status === "withdrawn") summary[status] += 1;
+            else summary.other += 1;
+        });
+        return summary;
+    }
+
+    function canStartHeaderDrag(target, button = 0) {
+        if (button !== 0) return false;
+        return !target?.closest?.("button, select, input, textarea, label, a, [contenteditable='true']");
+    }
+
     function section(title, body, actions = "") {
         return `<section class="ncc-section"><header class="ncc-section-head"><h2>${escapeHtml(title)}</h2>${actions}</header><div class="ncc-section-body">${body}</div></section>`;
     }
@@ -3139,6 +3156,12 @@
         const healthValue = rankings?.percentile === null || !rankings ? "Load" : formatPercent(rankings.percentile, 1);
         const healthSub = rankings ? `Income rank ${formatNumber(rankings.rank)} / ${formatNumber(rankings.total)}` : "Same-type weekly-income rank";
         const applications = Array.isArray(state.data?.applications) ? state.data.applications : [];
+        const applicationSummary = applicationStatusSummary(applications);
+        const applicationsAvailable = state.data?.applicationsAvailable !== false;
+        const applicationValue = applicationsAvailable ? `${formatNumber(applicationSummary.pending)} Pending` : "Unavailable";
+        const applicationDetail = applicationsAvailable
+            ? [`${formatNumber(applicationSummary.accepted)} Accepted`, `${formatNumber(applicationSummary.withdrawn)} Withdrawn`, applicationSummary.other ? `${formatNumber(applicationSummary.other)} Other` : ""].filter(Boolean).join(" · ")
+            : "Applications require a Limited or higher key";
         const grid = `
             <div class="ncc-grid">
                 ${metricCard("Company", profile.name || "Unknown", `${profile.type?.name || "Unknown type"} · ${formatNumber(profile.rating)}★`)}
@@ -3165,7 +3188,7 @@
             <div class="ncc-grid ncc-grid-3" style="margin-top:10px;">
                 ${metricCard("Trains", formatNumber(profile.trains), "Available company trains")}
                 ${metricCard("Ad budget", formatMoney(profile.advertisement_budget), "Daily operating cost")}
-                ${metricCard("Applications", formatNumber(applications.length), applications.length ? "Pending applicants" : "No pending applications")}
+                ${metricCard("Applications", applicationValue, applicationDetail, applicationsAvailable ? "" : "ncc-muted")}
             </div>`;
         const newsRows = (state.data?.news || []).slice(0, 4).map((item) => `<div class="ncc-kv"><span>${escapeHtml(formatDateTime(asNumber(item.timestamp) * 1000))}</span><span title="${escapeHtml(item.text || "")}">${escapeHtml(String(item.text || "No details").replace(/<[^>]*>/g, ""))}</span></div>`).join("");
         const recentNews = newsRows ? `<div class="ncc-news-list">${newsRows}</div>` : `<span class="ncc-muted">Funds news requires a Limited or higher key.</span>`;
@@ -4126,7 +4149,7 @@
         let drag = null;
         let resize = null;
         handle.addEventListener("pointerdown", (event) => {
-            if (event.button !== 0 || event.target.closest("button")) return;
+            if (!canStartHeaderDrag(event.target, event.button)) return;
             const rect = el.getBoundingClientRect();
             drag = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
             handle.setPointerCapture?.(event.pointerId);
@@ -4245,10 +4268,10 @@
 
     const testApi = {
         reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials,
-        roleStatEfficiency, calculateLocalRoleEfficiencies, localRoleTotalEfficiency,
+        roleStatEfficiency, calculateLocalRoleEfficiencies, localRoleTotalEfficiency, applicationStatusSummary,
         companyAccountMap, selectableCompanyOptions, normalizeCacheByCompany, cacheEnvelope, migrateLegacyCompanyStores,
         dailySyncDay, dailySyncNeedsRun, dailySyncPlan, alertTargetsForMode, sourceFreshness, tabFreshnessSummary,
-        layoutProfile, runtimeKind, runtimeMode, launcherTapActivates,
+        layoutProfile, runtimeKind, runtimeMode, launcherTapActivates, canStartHeaderDrag,
         assignProjectedRows, stockDifference, previousStockSnapshot,
         totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency,
         formatAverageEffectiveness, sortRows, orderedPriorityPositions, trendNumber,
