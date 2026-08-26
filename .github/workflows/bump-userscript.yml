@@ -1,0 +1,72 @@
+name: Auto Bump & Release Userscript
+
+on:
+  push:
+    branches:
+      - main # Triggers when you push or merge into main
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to push code, tags, and create releases
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetches full history so tags and release notes work correctly
+
+      # 1. Look at your commit history to figure out the next SemVer string
+      - name: Calculate Next Version
+        id: semver
+        uses: paulhatch/semantic-version@v5.4.0
+        with:
+          change_path: "."
+          default_bump_level: patch 
+
+      # 2. Find and update the '// @version' line in your userscript file
+      - name: Update Userscript Metadata Header
+        run: |
+          NEW_VERSION="${{ steps.semver.exports.version }}"
+          echo "Updating userscript to version $NEW_VERSION"
+          
+          TARGET_FILE="Naughty Awards Tracker.user.js" 
+          
+          # Use sed to replace the old @version line with the calculated version
+          sed -i -E "s/(\/\/ @version[[:space:]]+)[0-9]+\.[0-9]+\.[0-9]+/\1$NEW_VERSION/" "$TARGET_FILE"
+
+      # 3. Commit the updated script back to GitHub and add a Git Tag
+      - name: Commit and Push Changes
+        id: commit_step
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@://github.com"
+          
+          # Target file name must match the name used in step 2
+          TARGET_FILE="Naughty Awards Tracker.user.js" 
+          
+          git add "$TARGET_FILE"
+          
+          # Only commit if the file actually changed to avoid empty commit loops
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "chore: bump version to ${{ steps.semver.exports.version }} [skip ci]"
+            git tag "v${{ steps.semver.exports.version }}"
+            git push origin main --tags
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "No changes detected. Skipping commit and release."
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      # 4. Generate GitHub Release and Automatic Changelog
+      - name: Create GitHub Release
+        if: steps.commit_step.outputs.changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v${{ steps.semver.exports.version }}"
+          
+          # Creates a release, names it after the version, and auto-generates the changelog
+          gh release create "$TAG_NAME" \
+            --title "Release $TAG_NAME" \
+            --generate-notes
