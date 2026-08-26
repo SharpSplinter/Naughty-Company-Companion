@@ -1,5 +1,6 @@
 .DS_Store
 *.log
 *.user.js.bak
+### User Files
 .codebase-memory/
 assets/

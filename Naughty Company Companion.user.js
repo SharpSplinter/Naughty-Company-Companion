@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.2
+// @version      1.3.3
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -26,7 +26,9 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.3.2";
+    const VERSION = GM_info.script.version;
+    console.log('Running script version: ${VERSION}');
+
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const PDA_INJECTED_TORN_KEY = "_###PDA-APIKEY###_";
