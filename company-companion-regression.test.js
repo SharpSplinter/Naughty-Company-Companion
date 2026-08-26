@@ -170,8 +170,8 @@ test("company accounts remain isolated and the selector always offers Add compan
     assert.doesNotMatch(source, /value="\$\{escapeHtml\(settings\.(?:tornKey|tornStatsKey)\)\}"/);
 });
 
-test("all configured companies sync once at 18:05 and reuse a same-type ranking pull", () => {
-    const tick = Date.UTC(2026, 7, 24, 18, 5, 0);
+test("all configured companies sync once at 18:10 and reuse a same-type ranking pull", () => {
+    const tick = Date.UTC(2026, 7, 24, 18, 10, 0);
     const accounts = companion.companyAccountMap({
         companyAccounts: {
             101: { id: 101, name: "Alpha", typeId: 4, typeName: "Oil Rig", key: "one" },
@@ -207,12 +207,41 @@ test("alert delivery modes select no, all-combined, all-separate, or only active
     assert.deepEqual(companion.alertTargetsForMode("selected", accounts, 202), [[202]]);
 });
 
-test("reporting day rolls over at 18:05 UTC", () => {
-    const before = Date.UTC(2026, 7, 18, 18, 4, 59);
-    const after = Date.UTC(2026, 7, 18, 18, 5, 0);
+test("reporting day rolls over at 18:10 UTC", () => {
+    const before = Date.UTC(2026, 7, 18, 18, 9, 59);
+    const after = Date.UTC(2026, 7, 18, 18, 10, 0);
 
-    assert.equal(companion.reportingPeriod(before), Date.UTC(2026, 7, 17, 18, 5, 0));
+    assert.equal(companion.reportingPeriod(before), Date.UTC(2026, 7, 17, 18, 10, 0));
     assert.equal(companion.reportingPeriod(after), after);
+});
+
+test("daily snapshot history is de-duplicated by reporting day across the 18:05 to 18:10 migration", () => {
+    const legacy = {
+        period: Date.UTC(2026, 7, 24, 18, 5, 0),
+        capturedAt: Date.UTC(2026, 7, 24, 18, 5, 10),
+        dailyIncome: 1000,
+        weeklyIncome: 7000,
+        stock: { 1: { inStock: 10, onOrder: 0 } }
+    };
+    const current = {
+        period: Date.UTC(2026, 7, 24, 18, 10, 0),
+        capturedAt: Date.UTC(2026, 7, 24, 18, 10, 10),
+        dailyProfit: 800,
+        stockAvailable: true,
+        stock: { 1: { inStock: 12, onOrder: 0 } }
+    };
+    const normalized = companion.normalizeHistory({ 101: [legacy, current] })[101];
+
+    assert.equal(companion.historySnapshotDay(legacy), "2026-08-24");
+    assert.equal(companion.historySnapshotDay(current), "2026-08-24");
+    assert.equal(normalized.length, 1);
+    assert.equal(normalized[0].reportingDay, "2026-08-24");
+    assert.equal(normalized[0].period, current.period);
+    assert.equal(normalized[0].dailyIncome, 1000);
+    assert.equal(normalized[0].dailyProfit, 800);
+    assert.equal(normalized[0].stock[1].inStock, 12);
+    assert.match(source, /const priorSnapshots = history\.filter\(\(entry\) => historySnapshotDay\(entry, period\) === reportingDay\);/);
+    assert.match(source, /mergeHistorySnapshot\(existingSnapshot, row\)/);
 });
 
 test("stock difference compares current stock to the prior reporting-day snapshot", () => {
@@ -343,20 +372,20 @@ test("virtual keyboard guard preserves focused mobile panels without swallowing 
     assert.match(source, /max-height:none !important/);
 });
 
-test("daily Company work shares the 18:05 UTC reporting boundary", () => {
-    const beforeTick = Date.UTC(2026, 7, 24, 18, 4, 59);
-    const tick = Date.UTC(2026, 7, 24, 18, 5, 0);
-    const nextTick = Date.UTC(2026, 7, 25, 18, 5, 0);
+test("daily Company work shares the 18:10 UTC reporting boundary", () => {
+    const beforeTick = Date.UTC(2026, 7, 24, 18, 9, 59);
+    const tick = Date.UTC(2026, 7, 24, 18, 10, 0);
+    const nextTick = Date.UTC(2026, 7, 25, 18, 10, 0);
 
-    assert.equal(companion.isDailyAlertDue(beforeTick, 5), false);
-    assert.equal(companion.isDailyAlertDue(tick, 5), true);
-    assert.equal(companion.dailyAlertPhaseTime(tick, 5), tick);
+    assert.equal(companion.isDailyAlertDue(beforeTick, 10), false);
+    assert.equal(companion.isDailyAlertDue(tick, 10), true);
+    assert.equal(companion.dailyAlertPhaseTime(tick, 10), tick);
     assert.equal(companion.nextDailyAlertTimestamp(tick), nextTick);
     assert.equal(companion.dailySyncDay(beforeTick), "2026-08-23");
     assert.equal(companion.dailySyncDay(tick), "2026-08-24");
     assert.equal(companion.dailySyncNeedsRun({ day: "2026-08-23" }, tick), true);
     assert.equal(companion.dailySyncNeedsRun({ day: "2026-08-24", completedAt: tick }, nextTick - 1), false);
-    assert.doesNotMatch(source, /18:00 UTC|18:10 UTC/);
+    assert.doesNotMatch(source, /18:00 UTC|18:05 UTC/);
     assert.match(source, /await runDailySync\(\{ scheduled: true, deliverAlerts: true \}\);[\s\S]*?finally \{[\s\S]*?scheduleDailyCompanySync\(\);/);
 });
 
@@ -397,7 +426,7 @@ test("daily alert toasts keep full messages stacked instead of replacing one ano
 });
 
 test("daily tick alert reports full daily income, profit, customer, star, and stock-difference details", () => {
-    const tick = Date.UTC(2026, 7, 24, 18, 5, 0);
+    const tick = Date.UTC(2026, 7, 24, 18, 10, 0);
     const alert = companion.buildDailyTickAlert({
         fetchedAt: tick + 1000,
         profile: {
@@ -435,7 +464,7 @@ test("daily stock difference totals all current and prior stock items as an inte
 });
 
 test("employee effectiveness alert lists every addiction or inactivity penalty below -12", () => {
-    const tick = Date.UTC(2026, 7, 24, 18, 5, 0);
+    const tick = Date.UTC(2026, 7, 24, 18, 10, 0);
     const data = {
         fetchedAt: tick + 1000,
         employees: [
@@ -453,10 +482,10 @@ test("employee effectiveness alert lists every addiction or inactivity penalty b
     assert.equal(alert.source.fresh, true);
 });
 
-test("native background reminders use the unified 18:05 daily phase and generic text only", () => {
+test("native background reminders use the unified 18:10 daily phase and generic text only", () => {
     const beforeTick = Date.UTC(2026, 7, 24, 17, 0, 0);
-    const tick = Date.UTC(2026, 7, 24, 18, 5, 0);
-    const tomorrowTick = Date.UTC(2026, 7, 25, 18, 5, 0);
+    const tick = Date.UTC(2026, 7, 24, 18, 10, 0);
+    const tomorrowTick = Date.UTC(2026, 7, 25, 18, 10, 0);
     const income = companion.buildDailyTickReminder("income", beforeTick);
     const employee = companion.buildDailyTickReminder("employeeRisk", beforeTick);
 
@@ -469,7 +498,7 @@ test("native background reminders use the unified 18:05 daily phase and generic 
     assert.equal(companion.dailyAlertKindAt(tick), "income");
     assert.deepEqual(companion.dailyAlertKindsAt(tick), ["income", "employeeRisk"]);
     assert.equal(companion.dailyAlertKindAt(beforeTick), null);
-    assert.equal(companion.nextDailyReminderTimestamp({ minute: 5 }, tick), tomorrowTick);
+    assert.equal(companion.nextDailyReminderTimestamp({ minute: 10 }, tick), tomorrowTick);
 });
 
 test("console diagnostic descriptors never expose API query or header secrets", () => {
@@ -635,7 +664,9 @@ test("Company keeps Stock trend in Stock, retains compact rank lists, and expose
     assert.match(source, /PDA_INJECTED_TORN_KEY/);
     assert.match(source, /documentIsHidden\(\)/);
     assert.match(source, /data-compact-layout="true"\] \.ncc-trend-detail \{ grid-template-columns:minmax\(0,1fr\);/);
-    assert.match(source, /DAILY_SYNC_MINUTE_UTC = 5/);
+    assert.match(source, /DAILY_SYNC_MINUTE_UTC = 10/);
+    assert.match(source, /function historySnapshotDay\(/);
+    assert.match(source, /function mergeHistorySnapshot\(/);
     assert.match(source, /runDailySync\(/);
 });
 

@@ -2,3 +2,4 @@
 *.log
 *.user.js.bak
 .codebase-memory/
+assets/

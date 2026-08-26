@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.1
+// @version      1.3.2
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -26,13 +26,13 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.3.1";
+    const VERSION = "1.3.2";
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
     const PDA_INJECTED_TORN_KEY = "_###PDA-APIKEY###_";
     const DAY = 86400000;
     const DAILY_TICK_HOUR_UTC = 18;
-    const DAILY_SYNC_MINUTE_UTC = 5;
+    const DAILY_SYNC_MINUTE_UTC = 10;
     const DAILY_ALERTS = Object.freeze({
         income: {
             minute: DAILY_SYNC_MINUTE_UTC,
@@ -1823,7 +1823,7 @@
             }, { immediate: true });
             if (deliverAlerts) await deliverDailyCompanyAlerts([...completed], Date.now());
             state.status = completed.size
-                ? `Daily sync updated ${formatNumber(completed.size)} configured compan${completed.size === 1 ? "y" : "ies"} at 18:05 UTC.`
+                ? `Daily sync updated ${formatNumber(completed.size)} configured compan${completed.size === 1 ? "y" : "ies"} at 18:10 UTC.`
                 : "Daily sync is waiting for a successful Company and rankings response.";
             debugLog("daily-sync:complete", { refreshed: refreshed.length, completed: completed.size, rankingGroups: grouped.length });
             render();
@@ -1852,7 +1852,7 @@
             } catch (error) {
                 warningLog("daily-sync:scheduled failure", { reason: safeDiagnosticError(error) });
             } finally {
-                // A transient storage/native failure must never disable tomorrow's 18:05 sync.
+                // A transient storage/native failure must never disable tomorrow's 18:10 sync.
                 scheduleDailyCompanySync();
             }
         }, Math.max(0, target - Date.now() + 300));
@@ -1874,6 +1874,51 @@
 
     function companyHistory(companyId = state.data?.profile?.id) {
         return Array.isArray(state.history?.[String(companyId)]) ? state.history[String(companyId)] : [];
+    }
+
+    function historySnapshotDay(entry, fallbackTimestamp = Date.now()) {
+        if (!isObject(entry)) return "";
+        const explicit = String(entry.reportingDay ?? entry.snapshotDay ?? "").trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(explicit)) return explicit;
+        const period = asFinite(entry.period);
+        if (period !== null) {
+            const periodDate = new Date(period);
+            if (periodDate.getUTCHours() === DAILY_TICK_HOUR_UTC && (periodDate.getUTCMinutes() === 5 || periodDate.getUTCMinutes() === DAILY_SYNC_MINUTE_UTC)) {
+                return utcDayKey(period);
+            }
+        }
+        const capturedAt = asFinite(entry.capturedAt);
+        const timestamp = capturedAt ?? period ?? asFinite(fallbackTimestamp);
+        return timestamp === null ? "" : dailySyncDay(timestamp);
+    }
+
+    function historySnapshotTimestamp(entry) {
+        return asFinite(entry?.capturedAt) ?? asFinite(entry?.period) ?? 0;
+    }
+
+    function mergeHistorySnapshot(existing, incoming) {
+        if (!isObject(existing)) return incoming;
+        const value = (current, previous) => current === null || current === undefined ? previous ?? null : current;
+        const incomingStockAvailable = incoming?.stockAvailable !== false && isObject(incoming?.stock);
+        return {
+            ...existing,
+            ...incoming,
+            reportingDay: incoming.reportingDay || historySnapshotDay(existing),
+            capturedAt: asFinite(existing.capturedAt) ?? incoming.capturedAt,
+            updatedAt: incoming.updatedAt ?? incoming.capturedAt ?? existing.updatedAt,
+            dailyIncome: value(incoming.dailyIncome, existing.dailyIncome),
+            weeklyIncome: value(incoming.weeklyIncome, existing.weeklyIncome),
+            dailyProfit: value(incoming.dailyProfit, existing.dailyProfit),
+            weeklyProfit: value(incoming.weeklyProfit, existing.weeklyProfit),
+            funds: value(incoming.funds, existing.funds),
+            rating: value(incoming.rating, existing.rating),
+            stockQuantity: incomingStockAvailable ? value(incoming.stockQuantity, existing.stockQuantity) : existing.stockQuantity ?? null,
+            stockValue: incomingStockAvailable ? value(incoming.stockValue, existing.stockValue) : existing.stockValue ?? null,
+            averageEmployeeEfficiency: value(incoming.averageEmployeeEfficiency, existing.averageEmployeeEfficiency),
+            companyRank: value(incoming.companyRank, existing.companyRank),
+            companyRankTotal: value(incoming.companyRankTotal, existing.companyRankTotal),
+            stock: incomingStockAvailable ? incoming.stock : existing.stock ?? {}
+        };
     }
 
     function monthMetrics(data = state.data) {
@@ -1902,6 +1947,11 @@
         if (!profile?.id) return;
         const id = String(profile.id);
         const period = reportingPeriod();
+        const reportingDay = dailySyncDay();
+        const capturedAt = Date.now();
+        const history = companyHistory(id);
+        const priorSnapshots = history.filter((entry) => historySnapshotDay(entry, period) === reportingDay);
+        const existingSnapshot = priorSnapshots.sort((left, right) => historySnapshotTimestamp(left) - historySnapshotTimestamp(right)).reduce((merged, entry) => merged ? mergeHistorySnapshot(merged, entry) : entry, null);
         const financesNow = financials(data);
         const stock = Array.isArray(data?.stock) ? data.stock : [];
         const stockAvailable = data?.stockAvailable === true;
@@ -1914,7 +1964,9 @@
         const efficiencyRows = (Array.isArray(data?.employees) ? data.employees : []).map((employee) => asFinite(employee?.effectiveness?.total)).filter((value) => value !== null);
         const row = {
             period,
-            capturedAt: Date.now(),
+            reportingDay,
+            capturedAt,
+            updatedAt: capturedAt,
             dailyIncome: financesNow.dailyIncome,
             weeklyIncome: financesNow.weeklyIncome,
             dailyProfit: financesNow.dailyProfit,
@@ -1923,6 +1975,7 @@
             rating: asFinite(profile.rating),
             stockQuantity: stockAvailable ? stockNow.inStock : null,
             stockValue: stockAvailable ? stockNow.saleValue : null,
+            stockAvailable,
             averageEmployeeEfficiency: efficiencyRows.length ? efficiencyRows.reduce((sum, value) => sum + asNumber(value), 0) / efficiencyRows.length : null,
             companyRank: trendNumber(rankingsNow?.rank),
             companyRankTotal: trendNumber(rankingsNow?.total),
@@ -1931,8 +1984,8 @@
                 onOrder: asNumber(item.on_order)
             }]))
         };
-        const existing = companyHistory(id).filter((entry) => entry.period !== period && entry.period > period - 92 * DAY);
-        state.history[id] = [...existing, row].sort((left, right) => left.period - right.period);
+        const retained = history.filter((entry) => historySnapshotDay(entry, period) !== reportingDay && entry.period > period - 92 * DAY);
+        state.history[id] = [...retained, mergeHistorySnapshot(existingSnapshot, row)].sort((left, right) => left.period - right.period);
         if (persist) await storeSet(STORE.history, state.history);
         return state.history;
     }
@@ -2120,7 +2173,8 @@
         state.layout = { ...DEFAULT_LAYOUT, ...(isObject(layout) ? layout : {}) };
         state.cacheByCompany = migrated.cacheByCompany;
         state.cache = null;
-        state.history = normalizeHistory(history);
+        const normalizedHistory = normalizeHistory(history);
+        state.history = normalizedHistory;
         state.rankings = isObject(rankings) ? rankings : {};
         state.rankHistory = isObject(rankHistory) ? rankHistory : {};
         state.starCohorts = isObject(starCohorts) ? starCohorts : {};
@@ -2132,20 +2186,32 @@
         if (firstId) activateCompanySnapshot(firstId);
         const settingsChanged = isObject(stored[STORE.settings]) && JSON.stringify(stored[STORE.settings]) !== JSON.stringify(state.settings);
         const cacheChanged = stored[STORE.cache] !== undefined && JSON.stringify(stored[STORE.cache]) !== JSON.stringify(migrated.cache);
-        if (settingsChanged || cacheChanged) {
-            await storeSetMany({ [STORE.settings]: state.settings, [STORE.cache]: migrated.cache }, { immediate: true });
+        const historyChanged = JSON.stringify(history) !== JSON.stringify(normalizedHistory);
+        if (settingsChanged || cacheChanged || historyChanged) {
+            const updates = {};
+            if (settingsChanged) updates[STORE.settings] = state.settings;
+            if (cacheChanged) updates[STORE.cache] = migrated.cache;
+            if (historyChanged) updates[STORE.history] = normalizedHistory;
+            await storeSetMany(updates, { immediate: true });
         }
         await removeLegacyProjectionStore();
     }
 
     function normalizeHistory(history) {
         if (!isObject(history)) return {};
-        return Object.fromEntries(Object.entries(history).map(([companyId, entries]) => [companyId, Array.isArray(entries) ? entries.map((entry) => {
-            if (!isObject(entry)) return entry;
-            const legacyDaily = entry[Object.keys(entry).find((key) => key.startsWith("daily") && key !== "dailyIncome" && key !== "dailyProfit")];
-            const legacyWeekly = entry[Object.keys(entry).find((key) => key.startsWith("weekly") && key !== "weeklyIncome" && key !== "weeklyProfit")];
-            return { ...entry, dailyIncome: entry.dailyIncome ?? legacyDaily, weeklyIncome: entry.weeklyIncome ?? legacyWeekly };
-        }) : []]));
+        return Object.fromEntries(Object.entries(history).map(([companyId, entries]) => {
+            const byReportingDay = new Map();
+            (Array.isArray(entries) ? entries : []).filter(isObject).map((entry) => {
+                const legacyDaily = entry[Object.keys(entry).find((key) => key.startsWith("daily") && key !== "dailyIncome" && key !== "dailyProfit")];
+                const legacyWeekly = entry[Object.keys(entry).find((key) => key.startsWith("weekly") && key !== "weeklyIncome" && key !== "weeklyProfit")];
+                const reportingDay = historySnapshotDay(entry);
+                return { ...entry, reportingDay, dailyIncome: entry.dailyIncome ?? legacyDaily, weeklyIncome: entry.weeklyIncome ?? legacyWeekly };
+            }).sort((left, right) => historySnapshotTimestamp(left) - historySnapshotTimestamp(right)).forEach((entry) => {
+                const key = entry.reportingDay || `legacy:${entry.period}:${entry.capturedAt}`;
+                byReportingDay.set(key, mergeHistorySnapshot(byReportingDay.get(key), entry));
+            });
+            return [companyId, [...byReportingDay.values()].sort((left, right) => asNumber(left.period) - asNumber(right.period))];
+        }));
     }
 
     function sourceFreshness(sourceTimeMap, now = Date.now()) {
@@ -3543,8 +3609,8 @@
             const item = trendChartDefinition(type);
             return `<option value="${item.id}" ${item.id === chart.id ? "selected" : ""}>${escapeHtml(item.label)}</option>`;
         }).join("");
-        const table = latest.length ? `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr><th>Reporting day</th><th>Daily income</th><th>Daily Profit</th><th>Weekly income</th><th>Weekly Profit</th><th>Rating</th><th>Funds</th></tr></thead><tbody>${latest.map((row) => `<tr>${stackCell("Reporting day", escapeHtml(formatDateTime(row.period)))}${stackCell("Daily income", trendNumber(row.dailyIncome) === null ? "—" : formatMoney(row.dailyIncome), "ncc-good")}${stackCell("Daily Profit", trendNumber(row.dailyProfit) === null ? "—" : formatMoney(row.dailyProfit), trendNumber(row.dailyProfit) === null ? "ncc-muted" : row.dailyProfit >= 0 ? "ncc-good" : "ncc-bad")}${stackCell("Weekly income", trendNumber(row.weeklyIncome) === null ? "—" : formatMoney(row.weeklyIncome))}${stackCell("Weekly Profit", trendNumber(row.weeklyProfit) === null ? "—" : formatMoney(row.weeklyProfit))}${stackCell("Rating", trendNumber(row.rating) === null ? "—" : `${formatNumber(row.rating)}★`)}${stackCell("Funds", trendNumber(row.funds) === null ? "—" : formatMoney(row.funds))}</tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice">The companion keeps one local snapshot per Torn reporting day (18:05 UTC). Refresh after installing to begin history.</div>`;
-        return `${dataNotice()}<div class="ncc-toolbar"><label class="ncc-inline"><span class="ncc-label">Chart view</span><select id="ncc-trend-chart" class="ncc-select" title="Choose the local daily metric to chart">${chartOptions}</select></label><button class="ncc-button" data-action="export-history" ${history.length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="reset-history" ${history.length ? "" : "disabled"}>Clear local history</button><span class="ncc-help">${formatNumber(history.length)} retained daily snapshots · 92-day retention</span></div>${section(`${chart.label} trend`, trendSvg(history, chart.id))}${section("Local company history", table)}<p class="ncc-note">History stays in your userscript storage and is never uploaded by this companion. Income comes from daily Torn snapshots; Profit is calculated locally from the available daily inputs. Stock worth is recorded only when stock details are available; average employee effectiveness is the displayed current-effectiveness average; company rank is recorded only after same-type rankings load. Older snapshots can lack these newer metrics and remain unavailable rather than being inferred.</p>`;
+        const table = latest.length ? `<div class="ncc-table-wrap ncc-stack-wrap"><table class="ncc-table ncc-stack-table"><thead><tr><th>Reporting day</th><th>Daily income</th><th>Daily Profit</th><th>Weekly income</th><th>Weekly Profit</th><th>Rating</th><th>Funds</th></tr></thead><tbody>${latest.map((row) => `<tr>${stackCell("Reporting day", escapeHtml(formatDateTime(row.period)))}${stackCell("Daily income", trendNumber(row.dailyIncome) === null ? "—" : formatMoney(row.dailyIncome), "ncc-good")}${stackCell("Daily Profit", trendNumber(row.dailyProfit) === null ? "—" : formatMoney(row.dailyProfit), trendNumber(row.dailyProfit) === null ? "ncc-muted" : row.dailyProfit >= 0 ? "ncc-good" : "ncc-bad")}${stackCell("Weekly income", trendNumber(row.weeklyIncome) === null ? "—" : formatMoney(row.weeklyIncome))}${stackCell("Weekly Profit", trendNumber(row.weeklyProfit) === null ? "—" : formatMoney(row.weeklyProfit))}${stackCell("Rating", trendNumber(row.rating) === null ? "—" : `${formatNumber(row.rating)}★`)}${stackCell("Funds", trendNumber(row.funds) === null ? "—" : formatMoney(row.funds))}</tr>`).join("")}</tbody></table></div>` : `<div class="ncc-notice">The companion keeps one de-duplicated local snapshot per Torn reporting day (18:10 UTC). Refresh after installing to begin history.</div>`;
+        return `${dataNotice()}<div class="ncc-toolbar"><label class="ncc-inline"><span class="ncc-label">Chart view</span><select id="ncc-trend-chart" class="ncc-select" title="Choose the local daily metric to chart">${chartOptions}</select></label><button class="ncc-button" data-action="export-history" ${history.length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="reset-history" ${history.length ? "" : "disabled"}>Clear local history</button><span class="ncc-help">${formatNumber(history.length)} retained daily snapshots · 92-day retention</span></div>${section(`${chart.label} trend`, trendSvg(history, chart.id))}${section("Local company history", table)}<p class="ncc-note">History stays in your userscript storage and is never uploaded by this companion. Income comes from one de-duplicated daily Torn snapshot per 18:10 UTC reporting day; Profit is calculated locally from the available daily inputs. Stock worth is recorded only when stock details are available; average employee effectiveness is the displayed current-effectiveness average; company rank is recorded only after same-type rankings load. Older snapshots can lack these newer metrics and remain unavailable rather than being inferred.</p>`;
     }
 
     function renderBackupRestoreModal() {
@@ -3571,7 +3637,7 @@
         const accountsSection = section("Company Director keys", `${accountRows}<div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="open-company-account">Add company…</button><button class="ncc-button" data-action="refresh-all-companies">Sync saved companies now</button></div><p class="ncc-note">Each Limited-access Director key is validated against its own Company ID before it is saved. Saved keys are never rendered, logged, exported by default, or stored in TornPDA injected-key form.</p>`);
         const runtimeStorage = section("Runtime & storage", `<div class="ncc-kv"><span>Runtime</span><span>${escapeHtml(runtime)} · ${escapeHtml(state.runtimeKind)}</span></div><div class="ncc-kv"><span>Layout profile</span><span>${escapeHtml(state.layoutProfile)}</span></div><div class="ncc-kv"><span>Current screen size</span><span>${escapeHtml(screenSize)}</span></div><div class="ncc-kv"><span>Storage method</span><span>${escapeHtml(storageMethodLabel())}</span></div><label class="ncc-check" style="margin-top:10px"><input id="ncc-use-legacy-gm-storage" type="checkbox" ${settings.useLegacyGMStorage ? "checked" : ""}><span><b>Use legacy GM storage</b><br>Unchecked keeps TornPDA <code>PDA_storage</code> primary when available, with compatible GM/local fallback.</span></label>`);
         const alertModeOptions = [["off", "Off"], ["combined", "Combined all-company alert"], ["separate", "Separate alert for every company"], ["selected", "Selected company only"]].map(([value, label]) => `<option value="${value}" ${settings.dailyAlertMode === value ? "selected" : ""}>${label}</option>`).join("");
-        const dailyAlertSettings = section("Daily Company alerts", `<label><span class="ncc-label">Alert scope at 18:05 UTC</span><select id="ncc-daily-alert-mode" class="ncc-select" style="width:100%;margin-top:6px">${alertModeOptions}</select></label><div class="ncc-grid ncc-grid-2" style="margin-top:10px"><label class="ncc-check"><input id="ncc-daily-tick-toasts" type="checkbox" ${settings.dailyTickToasts ? "checked" : ""}><span><b>Show daily-tick toasts</b><br>Daily Income, Daily Profit, Customer Count, Star Level, stock change, and employee-risk details remain fully visible.</span></label><label class="ncc-check"><input id="ncc-daily-tick-notifications" type="checkbox" ${settings.dailyTickNotifications ? "checked" : ""}><span><b>Show daily-tick notifications</b><br>TornPDA receives one native 18:05 reminder to open the Companion for its all-company sync.</span></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save daily alert choices</button></div>`);
+        const dailyAlertSettings = section("Daily Company alerts", `<label><span class="ncc-label">Alert scope at 18:10 UTC</span><select id="ncc-daily-alert-mode" class="ncc-select" style="width:100%;margin-top:6px">${alertModeOptions}</select></label><div class="ncc-grid ncc-grid-2" style="margin-top:10px"><label class="ncc-check"><input id="ncc-daily-tick-toasts" type="checkbox" ${settings.dailyTickToasts ? "checked" : ""}><span><b>Show daily-tick toasts</b><br>Daily Income, Daily Profit, Customer Count, Star Level, stock change, and employee-risk details remain fully visible.</span></label><label class="ncc-check"><input id="ncc-daily-tick-notifications" type="checkbox" ${settings.dailyTickNotifications ? "checked" : ""}><span><b>Show daily-tick notifications</b><br>TornPDA receives one native 18:10 reminder to open the Companion for its all-company sync.</span></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save daily alert choices</button></div>`);
         const backupRestore = section("Backup & restore", `<label class="ncc-check"><input id="ncc-backup-include-keys" type="checkbox"><span><b>Include saved Director keys in this backup</b><br>Unchecked by default. Keys are never displayed, logged, or included unless selected for this single download.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="download-company-backup">Download local Company backup</button><button class="ncc-button" data-action="choose-company-backup">Choose backup JSON to restore</button><input id="ncc-company-backup-file" type="file" accept="application/json,.json" style="display:none"></div><p class="ncc-note">Backups include separate company snapshots, history, rankings, planner data, layout, settings, daily-sync state, and alerts. API keys stay out unless you opt in both when creating and restoring a key-containing backup.</p>`);
         return `${dataNotice()}${accountsSection}${section("Local calculation & refresh", `<div class="ncc-grid ncc-grid-2"><label class="ncc-check"><input id="ncc-stock-cost" type="checkbox" ${settings.includeStockCost ? "checked" : ""}><span><b>Include sold stock cost in daily Profit.</b><br>Daily Profit subtracts sold stock cost, ads, and wages when all required data is available.</span></label><label><span class="ncc-label">Automatic foreground refresh</span><div class="ncc-inline" style="margin-top:6px"><input id="ncc-refresh-minutes" class="ncc-input" type="number" min="2" max="120" value="${clamp(asNumber(settings.autoRefreshMinutes, 10), 2, 120)}" style="width:85px"><span class="ncc-help">minutes while the page is active</span></div></label></div><p class="ncc-note">Role projections use the bundled local calculator. Employee work stats never leave Torn for an efficiency lookup.</p><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save preferences only</button><button class="ncc-button" data-action="reset-layout">Reset panel position</button></div>`)}${dailyAlertSettings}${runtimeStorage}${backupRestore}${section("Local data", `<div class="ncc-inline"><button class="ncc-button" data-action="export-history" ${companyHistory().length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="clear-local-data">Clear companion data</button></div><p class="ncc-note">Clearing Companion data deletes local company snapshots, rankings, plans, history, daily-sync records, and saved Director keys. It cannot change Torn data.</p>`)}<p class="ncc-note">Naughty Company Companion ${VERSION} · TornPDA/Tampermonkey compatible.</p>`;
     }
@@ -4270,7 +4336,7 @@
         reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials,
         roleStatEfficiency, calculateLocalRoleEfficiencies, localRoleTotalEfficiency, applicationStatusSummary,
         companyAccountMap, selectableCompanyOptions, normalizeCacheByCompany, cacheEnvelope, migrateLegacyCompanyStores,
-        dailySyncDay, dailySyncNeedsRun, dailySyncPlan, alertTargetsForMode, sourceFreshness, tabFreshnessSummary,
+        dailySyncDay, dailySyncNeedsRun, dailySyncPlan, historySnapshotDay, mergeHistorySnapshot, normalizeHistory, alertTargetsForMode, sourceFreshness, tabFreshnessSummary,
         layoutProfile, runtimeKind, runtimeMode, launcherTapActivates, canStartHeaderDrag,
         assignProjectedRows, stockDifference, previousStockSnapshot,
         totalStockDifference, dailyTickStockDifference, currentStockWorth, preferredCurrentEfficiency,

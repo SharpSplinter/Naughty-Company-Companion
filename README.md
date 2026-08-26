@@ -10,6 +10,10 @@ Naughty Company Companion is a Tampermonkey and TornPDA dashboard for Torn compa
 
 The project is an independent community userscript. It is not affiliated with Torn, Tampermonkey, or TornPDA.
 
+## Canonical UI/UX baseline
+
+Every active Naughty companion follows the [Naughty Companion GUI/UX/UI Standard](NAUGHTY_COMPANION_GUI_UX_UI_STANDARD.md). Its Shared sections apply everywhere; Company-only behavior is explicitly isolated in Appendix A so other scripts never inherit unnecessary Company features.
+
 ## Features
 
 ### Overview and income
@@ -31,7 +35,7 @@ The project is an independent community userscript. It is not affiliated with To
 
 ### Rankings, stock, and trends
 
-- Same-type company ranking is refreshed through verified Torn pagination once per Torn day at **18:05 UTC**, then sorted locally by weekly income. A manual refresh checks the persisted successful Torn-tick date and will not duplicate a completed daily ranking pull; a missed, failed, or incomplete pull remains eligible rather than saving an inaccurate rank.
+- Same-type company ranking is refreshed through verified Torn pagination once per Torn day at **18:10 UTC**, then sorted locally by weekly income. A manual refresh checks the persisted successful Torn-tick date and will not duplicate a completed daily ranking pull; a missed, failed, or incomplete pull remains eligible rather than saving an inaccurate rank.
 - Health score defined transparently as weekly-income percentile among same company type.
 - Observed weekly-income gaps to the next and previous star bands; these are planning values, not an official Torn formula.
 - Stock, sales, gross margin, per-item **Current stock worth** (in-stock quantity × sale price), and a daily **Stock difference** once a prior local reporting-day snapshot exists.
@@ -59,7 +63,7 @@ The project is an independent community userscript. It is not affiliated with To
 
 A Limited-access Director key is required for a saved company profile. It is validated against Company Profile and Company Employees before being saved, and each key must resolve to its own returned Company ID. A director/manager-capable key exposes more fields, including stock, employee wages, applications, and funds news. Missing fields remain unavailable rather than being treated as zero.
 
-The top **Refresh Torn data** action refreshes the selected company’s profile, employees, stock, funds news, and applications. The daily 18:05 UTC coordinator refreshes every configured company—even unselected ones—through a bounded queue, captures its reporting-day snapshot, and makes one ranking pull per shared company type. Same-type rankings run once per successful Torn reporting day; a manual ranking button checks that persisted completion first and never duplicates a completed daily pull.
+The top **Refresh Torn data** action refreshes the selected company’s profile, employees, stock, funds news, and applications. The daily 18:10 UTC coordinator refreshes every configured company—even unselected ones—through a bounded queue, captures or updates one de-duplicated reporting-day snapshot, and makes one ranking pull per shared company type. Same-type rankings run once per successful Torn reporting day; a manual ranking button checks that persisted completion first and never duplicates a completed daily pull.
 
 ## Local efficiency calculation and privacy
 
@@ -95,9 +99,9 @@ On mobile and TornPDA, the companion opts into the browser’s native virtual-ke
 
 Settings includes a **Backup & restore** section. It downloads a versioned Company-only JSON snapshot of every isolated company cache, history, rankings, planner state, layout, settings, alerts, and daily-sync state. API keys are excluded by default; including them on download and restoring them later both require separate explicit checkboxes. Version 1 single-company backups migrate to the version 2 profile model while discarding obsolete TornStats data. A keyless restore preserves matching keys already held locally; a key-containing backup replaces them only after its second explicit checkbox is selected. Loading validates the format, namespace, schema, and stored values before a second confirmation replaces current local Company data. Restoring never changes Torn data, and the currently selected storage adapter remains in use. User-initiated JSON backup and history CSV exports call TornPDA’s native `shareFile({ base64Data, fileName })` handler, which opens the system share sheet; desktop falls back to a normal local download. On Android and iOS, choose Files or another destination from that system sheet—it is not a browser save-location picker. The companion waits for a confirmed native result, reports a native share failure rather than falsely claiming a download, and prevents overlapping share requests.
 
-The daily coordinator runs at **18:05 UTC** while the Company page/userscript is active. It refreshes each pending saved company, captures a reporting-day snapshot, updates same-type rankings, and only then delivers optional alerts. Alert mode is persisted as **Off**, **Combined all-company alert**, **Separate alert for every company**, or **Selected company only**. Toasts and notifications remain independent opt-ins and default to off. The income message includes full Daily Income, Daily Profit, Daily Customer Count, Star Level, and integer Stock Difference versus the prior day; the employee message names every staff member below −12 Addiction or Inactivity effectiveness. Detailed in-panel toast cards stack instead of replacing one another. Desktop uses the userscript/browser-notification fallback; TornPDA uses native toast and notification handlers when available.
+The daily coordinator runs at **18:10 UTC** while the Company page/userscript is active. It refreshes each pending saved company, captures or updates one de-duplicated reporting-day snapshot, updates same-type rankings, and only then delivers optional alerts. Alert mode is persisted as **Off**, **Combined all-company alert**, **Separate alert for every company**, or **Selected company only**. Toasts and notifications remain independent opt-ins and default to off. The income message includes full Daily Income, Daily Profit, Daily Customer Count, Star Level, and integer Stock Difference versus the prior day; the employee message names every staff member below −12 Addiction or Inactivity effectiveness. Detailed in-panel toast cards stack instead of replacing one another. Desktop uses the userscript/browser-notification fallback; TornPDA uses native toast and notification handlers when available.
 
-When daily-tick notifications are enabled under a non-**Off** alert mode, confirmed TornPDA installs keep one generic native 18:05 UTC reminder with a callback to the Company page. It never claims live figures; it tells the user to open the companion so TornPDA can run the all-company sync. The reminder is refreshed on native startup/confirmation and removed when notifications are disabled or local companion data is cleared. Desktop deliberately has no simulated background-reminder capability. Scheduled page work and automatic foreground refreshes pause while the document is hidden; after a page becomes visible, a missed 18:05 all-company sync runs once for only the incomplete profiles.
+When daily-tick notifications are enabled under a non-**Off** alert mode, confirmed TornPDA installs keep one generic native 18:10 UTC reminder with a callback to the Company page. It never claims live figures; it tells the user to open the companion so TornPDA can run the all-company sync. The reminder is refreshed on native startup/confirmation and removed when notifications are disabled or local companion data is cleared. Desktop deliberately has no simulated background-reminder capability. Scheduled page work and automatic foreground refreshes pause while the document is hidden; after a page becomes visible, a missed 18:10 all-company sync runs once for only the incomplete profiles.
 
 ## Console diagnostics
 
