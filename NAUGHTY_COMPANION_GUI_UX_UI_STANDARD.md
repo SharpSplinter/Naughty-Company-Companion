@@ -186,6 +186,8 @@ These requirements apply only to Naughty Faction Companion.
 - In FFScouter compact/TornPDA layouts, War Targets parameters and the enemy list stack vertically rather than sit side by side.
 - All hospital-alert controls, including enable/disable, selected FF/BS-range behavior, time threshold, and reset, live in Faction Settings. The settings view fits horizontally, scrolls vertically with a hidden scrollbar, and remains readable on TornPDA.
 - FFScouter alerts only notify enemies that satisfy the currently selected FF/BS parameters; with no filter selected, eligible enemy players may be considered. First enable asks for the persisted 1, 3, or 5 minute threshold, with reset in Settings.
+- FFScouter may load a scheduled Ranked War opponent before the war begins so users can scout targets. Hospital-release alerts remain inactive until the Ranked War has started.
+- FFScouter **Sort & View** controls are persistently collapsible; the collapsed state shows a concise active-sort/filter/range summary and keeps the target list unobstructed.
 
 ## Appendix C — Naughty Inventory Companion only
 
