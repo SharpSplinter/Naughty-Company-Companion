@@ -769,3 +769,22 @@ test("Company backup and CSV exports use the TornPDA share sheet with a local-do
     assert.match(source, /Company backup opened in the TornPDA share sheet/);
     assert.match(source, /History CSV opened in the TornPDA share sheet/);
 });
+
+test("Private Security Firm role table uses Torn's Armorer spelling and legacy settings migrate onto it", () => {
+    const stats = { manual_labor: 40000, intelligence: 0, endurance: 80000 };
+    const projected = companion.calculateLocalRoleEfficiencies("Private Security Firm", stats);
+
+    assert.ok(Object.hasOwn(projected, "Armorer"));
+    assert.equal(Object.hasOwn(projected, "Armourer"), false);
+    assert.equal(projected.Armorer, 92);
+
+    const migrated = companion.migratePositionAliases({
+        assignments: { 1: "Armourer", 2: "Team Leader" },
+        positionCapacities: { co1: { Armourer: 1, Reconnaissance: 1 } },
+        positionPriority: { co1: ["Team Leader", "Armourer", "Armorer", "Medic"] }
+    });
+
+    assert.deepEqual(migrated.assignments, { 1: "Armorer", 2: "Team Leader" });
+    assert.deepEqual(migrated.positionCapacities.co1, { Armorer: 1, Reconnaissance: 1 });
+    assert.deepEqual(migrated.positionPriority.co1, ["Team Leader", "Armorer", "Medic"]);
+});
