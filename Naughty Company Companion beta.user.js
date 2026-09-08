@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion Beta
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.42-beta.2
+// @version      1.3.42-beta.3
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -26,7 +26,7 @@
 (() => {
     "use strict";
 
-    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.2";
+    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.3";
 
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
@@ -161,7 +161,8 @@
         panelHeight: null,
         releaseTimer: null
     };
-    const responsiveLayoutRuntime = { observer: null, frame: null };
+    const responsiveLayoutRuntime = { observer: null, frame: null, update: null };
+    const lifecycleRuntime = { booted: false, active: false, monitorId: null, viewportListenersBound: false };
     // Static role requirements; local calculations never transmit employee statistics.
     // Source data verified 2026-08-25 against Torn's public company position reference.
     const POSITION_NAME_ALIASES = Object.freeze({ Armourer: "Armorer" });
@@ -243,9 +244,16 @@
         if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
         return `${Math.floor(seconds / 86400)}d ago`;
     };
+    const isCompanyPageUrl = (value = typeof window !== "undefined" ? window.location.href : "") => {
+        try {
+            return /\/companies\.php$/i.test(new URL(String(value), "https://www.torn.com").pathname);
+        } catch {
+            return false;
+        }
+    };
     const documentIsHidden = () => {
         try {
-            return typeof document !== "undefined" && document.hidden === true;
+            return typeof document !== "undefined" && (document.hidden === true || !isCompanyPageUrl());
         } catch {
             return false;
         }
@@ -1320,6 +1328,16 @@
         return `${source}: ${error.error || error.message || error.code || "request failed"}`;
     }
 
+    function responseBodyText(response) {
+        if (typeof response === "string") return response;
+        const candidates = [response?.responseText, response?.response, response?.body];
+        for (const candidate of candidates) {
+            if (typeof candidate === "string" && candidate.trim()) return candidate;
+            if (candidate !== null && typeof candidate === "object") return JSON.stringify(candidate);
+        }
+        return typeof response?.responseText === "string" ? response.responseText : JSON.stringify(response ?? "");
+    }
+
     function gmTextRequest({ url, headers = {}, method = "GET", timeout = 30000 }) {
         return new Promise((resolve, reject) => {
             const request = safeRequestDescriptor(url, method);
@@ -1337,7 +1355,7 @@
                 if (settled) return;
                 const status = Number(response?.status ?? 200);
                 if (status >= 200 && status < 300) {
-                    const body = typeof response === "string" ? response : (response?.responseText ?? JSON.stringify(response?.body ?? response));
+                    const body = responseBodyText(response);
                     settled = true;
                     debugLog("api:success", { ...request, transport, status, durationMs: durationMs() });
                     resolve(body);
@@ -1401,11 +1419,23 @@
     }
 
     async function jsonRequest(options, source) {
-        const raw = await gmTextRequest(options);
         let payload;
-        try {
-            payload = JSON.parse(raw);
-        } catch {
+        let parseFailure = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            const raw = await gmTextRequest(options);
+            try {
+                payload = JSON.parse(raw);
+                parseFailure = null;
+                break;
+            } catch (error) {
+                parseFailure = error;
+                if (attempt === 0) {
+                    warningLog("api:invalid JSON retry", { ...safeRequestDescriptor(options?.url, options?.method), source });
+                    await sleep(250);
+                }
+            }
+        }
+        if (parseFailure) {
             const error = new Error(`${source}: Invalid JSON response.`);
             errorLog("api:payload failure", { ...safeRequestDescriptor(options?.url, options?.method), source, reason: safeDiagnosticError(error) });
             throw error;
@@ -2700,6 +2730,7 @@
                 applyLayout();
             });
         };
+        responsiveLayoutRuntime.update = update;
         responsiveLayoutRuntime.observer = new ResizeObserver(update);
         responsiveLayoutRuntime.observer.observe(el);
         window.visualViewport?.addEventListener("resize", update, { passive: true });
@@ -3793,6 +3824,10 @@
     }
 
     function render() {
+        if (!isCompanyPageUrl()) {
+            teardownShell();
+            return;
+        }
         mountShell();
         const tabs = [
             ["overview", "Overview"], ["team", "Team"], ["planner", "Planner"], ["rankings", "Rankings"], ["stock", "Stock"], ["trends", "Trends"], ["settings", "Settings"]
@@ -4315,8 +4350,11 @@
             grip.addEventListener("lostpointercapture", endResize);
         });
         el.addEventListener("pointerup", () => { void persistLayout(); });
-        window.addEventListener("resize", handleRuntimeViewportChange);
-        window.visualViewport?.addEventListener("resize", handleRuntimeViewportChange);
+        if (!lifecycleRuntime.viewportListenersBound) {
+            lifecycleRuntime.viewportListenersBound = true;
+            window.addEventListener("resize", handleRuntimeViewportChange);
+            window.visualViewport?.addEventListener("resize", handleRuntimeViewportChange);
+        }
     }
 
     function resetAutoRefresh() {
@@ -4327,8 +4365,60 @@
         state.autoRefreshId = setInterval(() => { void refreshCore({ silent: true, scheduled: true }); }, minutes * 60 * 1000);
     }
 
+    function stopPageRuntime() {
+        if (state.autoRefreshId) clearInterval(state.autoRefreshId);
+        state.autoRefreshId = null;
+        if (dailySyncRuntime.timerId) clearTimeout(dailySyncRuntime.timerId);
+        dailySyncRuntime.timerId = null;
+    }
+
+    function teardownShell() {
+        const root = typeof document === "undefined" ? null : document.getElementById(ROOT_ID);
+        root?.remove();
+        responsiveLayoutRuntime.observer?.disconnect();
+        responsiveLayoutRuntime.observer = null;
+        if (responsiveLayoutRuntime.frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(responsiveLayoutRuntime.frame);
+        responsiveLayoutRuntime.frame = null;
+        if (responsiveLayoutRuntime.update && typeof window !== "undefined") {
+            window.visualViewport?.removeEventListener("resize", responsiveLayoutRuntime.update);
+            window.visualViewport?.removeEventListener("scroll", responsiveLayoutRuntime.update);
+        }
+        responsiveLayoutRuntime.update = null;
+    }
+
+    function syncPageLifecycle() {
+        if (!lifecycleRuntime.booted || typeof document === "undefined") return;
+        const active = isCompanyPageUrl();
+        const mounted = Boolean(document.getElementById(ROOT_ID));
+        if (active === lifecycleRuntime.active && (active ? mounted : !mounted)) return;
+        lifecycleRuntime.active = active;
+        if (!active) {
+            stopPageRuntime();
+            teardownShell();
+            void persistLayout();
+            void flushStorageWrites();
+            return;
+        }
+        mountShell();
+        render();
+        resetAutoRefresh();
+        resetDailyTickAlerts();
+        resetDailyRankingRefresh();
+    }
+
+    function startPageLifecycleMonitor() {
+        if (lifecycleRuntime.monitorId || typeof window === "undefined") return;
+        lifecycleRuntime.monitorId = window.setInterval(syncPageLifecycle, 250);
+        window.addEventListener("popstate", syncPageLifecycle);
+        window.addEventListener("hashchange", syncPageLifecycle);
+    }
+
     async function boot() {
         await loadPersistedState();
+        lifecycleRuntime.booted = true;
+        lifecycleRuntime.active = isCompanyPageUrl();
+        startPageLifecycleMonitor();
+        if (!lifecycleRuntime.active) return;
         mountShell();
         const activeAccount = accountForCompany();
         debugLog("startup:ready", {
@@ -4387,7 +4477,7 @@
         isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert,
         employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp,
         dailyAlertKindAt, dailyAlertKindsAt, nextDailyReminderTimestamp, buildDailyTickReminder,
-        dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError,
+        dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, responseBodyText, isCompanyPageUrl,
         createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument,
         materializeCompanyBackupStores, utf8Base64
     };

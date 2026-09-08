@@ -8,6 +8,23 @@ const source = fs.readFileSync(path.join(__dirname, "Naughty Company Companion b
 test("userscript version remains safe in the Node regression runtime", () => {
     assert.match(source, /const VERSION = typeof GM_info !== "undefined"/);
 });
+
+test("startup response parsing prefers populated TornPDA payload fields and retries transient invalid JSON", () => {
+    assert.equal(companion.responseBodyText({ status: 200, responseText: "", response: { company: { id: 101 } } }), '{"company":{"id":101}}');
+    assert.equal(companion.responseBodyText({ status: 200, responseText: "  ", body: { ok: true } }), '{"ok":true}');
+    assert.equal(companion.responseBodyText({ status: 200, responseText: '{"ok":true}', response: { ok: false } }), '{"ok":true}');
+    assert.match(source, /for \(let attempt = 0; attempt < 2; attempt \+= 1\)/);
+    assert.match(source, /api:invalid JSON retry/);
+});
+
+test("SPA navigation limits the companion lifecycle to companies.php", () => {
+    assert.equal(companion.isCompanyPageUrl("https://www.torn.com/companies.php#/p=employees"), true);
+    assert.equal(companion.isCompanyPageUrl("https://www.torn.com/index.php#/bazaar"), false);
+    assert.equal(companion.isCompanyPageUrl("https://www.torn.com/companies.php-extra"), false);
+    assert.match(source, /window\.setInterval\(syncPageLifecycle, 250\)/);
+    assert.match(source, /if \(!isCompanyPageUrl\(\)\) \{\s*teardownShell\(\);/);
+    assert.match(source, /stopPageRuntime\(\);\s*teardownShell\(\);/);
+});
 const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Company-Companion/);
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Company-Companion\/test\/Naughty%20Company%20Companion%20beta\.user\.js/);
