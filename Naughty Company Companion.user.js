@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.41
+// @version      1.3.42-beta.1
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -26,7 +26,7 @@
 (() => {
     "use strict";
 
-    const VERSION = GM_info.script.version;
+    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.1";
 
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
@@ -164,6 +164,8 @@
     const responsiveLayoutRuntime = { observer: null, frame: null };
     // Static role requirements; local calculations never transmit employee statistics.
     // Source data verified 2026-08-25 against Torn's public company position reference.
+    const POSITION_NAME_ALIASES = Object.freeze({ Armourer: "Armorer" });
+    const normalizedPositionName = (value) => POSITION_NAME_ALIASES[String(value || "")] || String(value || "");
     const POSITION_REQUIREMENTS_B64 = "eyJIYWlyIFNhbG9uIjp7IlN0eWxpc3QiOlsxNTAwLDAsNzUwXSwiQ29sb3Jpc3QiOlsyMDAwLDAsMTAwMF0sIk5haWwgVGVjaG5pY2lhbiI6Wzc1MCwwLDE1MDBdLCJBcHByZW50aWNlIjpbNTAwLDAsMjUwXSwiU2hhbXBvb2lzdCI6WzEwMDAsMCw1MDBdLCJTZW5pb3IgU3R5bGlzdCI6WzMwMDAsMCwxNTAwXSwiUmVjZXB0aW9uaXN0IjpbMCwxMjUwLDI1MDBdLCJUcmFpbmVyIjpbMCw0NTAwLDIyNTBdLCJBZXN0aGV0aWNpYW4iOlswLDQ1MDAsMjI1MF19LCJMYXcgRmlybSI6eyJDbGVhbmVyIjpbNTUwMCwwLDI3NTBdLCJNYXJrZXRlciI6WzAsMjIwMDAsMTEwMDBdLCJDb25zdWx0YW50IjpbMCwzMzAwMCwxNjUwMF0sIlNlY3JldGFyeSI6WzAsODI1MCwxNjUwMF0sIkFzc2lzdGFudCI6WzAsMjc1MCw1NTAwXSwiQXR0b3JuZXkiOlswLDExMDAwLDU1MDBdfSwiRmxvd2VyIFNob3AiOnsiRmxvcmlzdCI6WzUwMCwwLDEwMDBdLCJBcnJhbmdlciI6WzUwMCwxMDAwLDBdLCJBcHByZW50aWNlIjpbMjUwLDAsNTAwXSwiQ2xlYW5lciI6WzUwMCwwLDI1MF0sIk1hbmFnZXIiOlswLDEwMDAsMjAwMF0sIk1hcmtldGVyIjpbMCwyMDAwLDEwMDBdLCJBY2NvdW50YW50IjpbMCw3NTAsMTUwMF19LCJDYXIgRGVhbGVyc2hpcCI6eyJUcmFpbmluZyBBZHZpc2VyIjpbMCw2MzAwMCwzMTUwMF0sIk1hbmFnZXIiOlswLDIxMDAwLDQyMDAwXSwiV2VibWFzdGVyIjpbMCw0MjAwMCwyMTAwMF0sIlJlY2VwdGlvbmlzdCI6WzAsMTU3NTAsMzE1MDBdLCJNZWNoYW5pYyI6WzI2NTAwLDAsMTMyNTBdLCJTYWxlcyBFeGVjdXRpdmUiOlswLDIxMDAwLDEwNTAwXSwiQ2xlYW5lciI6WzEwNTAwLDAsNTI1MF0sIlNhbGVzIEFwcHJlbnRpY2UiOlswLDU1MDAsMjc1MF19LCJDbG90aGluZyBTdG9yZSI6eyJMaW5lIE1hbmFnZXIiOlswLDYwMDAsMzAwMF0sIlN0b3JlIE1hbmFnZXIiOlswLDIwMDAsNDAwMF0sIk1hcmtldGluZyBNYW5hZ2VyIjpbMCw0MDAwLDIwMDBdLCJBY2NvdW50YW50IjpbMCwxNTAwLDMwMDBdLCJTZWN1cml0eSBHdWFyZCI6WzMwMDAsMCwxNTAwXSwiU2FsZXNwZXJzb24iOlswLDIwMDAsMTAwMF0sIkNhc2hpZXIiOls3NTAsMCwxNTAwXSwiQ2xlYW5lciI6WzEwMDAsMCw1MDBdLCJTYWxlcyBUcmFpbmVlIjpbMCw1MDAsMjUwXX0sIkd1biBTaG9wIjp7IkNsZXJrIjpbMzc1MCwwLDc1MDBdLCJHdW5zbWl0aCI6WzE1MDAwLDc1MDAsMF0sIkNsZWFuZXIiOls0MDAwLDAsMjAwMF0sIk1hbmFnZXIiOlswLDc1MDAsMTUwMDBdLCJCb29ra2VlcGVyIjpbMCw1NzUwLDExNTAwXSwiTWFya2V0ZXIiOlswLDE1MDAwLDc1MDBdLCJJbnN0cnVjdG9yIjpbMCwyMjUwMCwxMTI1MF19LCJHYW1lIFNob3AiOnsiQ2xlcmsiOlsxNTAwLDAsMzAwMF0sIkdhbWUgQWR2aXNvciI6WzAsNDUwMCwyMjUwXSwiQ2xlYW5lciI6WzE1MDAsMCw3NTBdLCJTdG9yZSBNYW5hZ2VyIjpbMCwzMDAwLDYwMDBdLCJBY2NvdW50YW50IjpbMCwyMjUwLDQ1MDBdLCJNYXJrZXRlciI6WzAsNjAwMCwzMDAwXX0sIkNhbmRsZSBTaG9wIjp7IkNoYW5kbGVyIjpbNDUwMCwyMjUwLDBdLCJUcmFpbmVyIjpbMCw0NTAwLDIyNTBdLCJRdWFsaXR5IENvbnRyb2wiOlswLDE1MDAsMzAwMF0sIkJvb2trZWVwZXIiOlswLDEyNTAsMjUwMF0sIlNhbGVzcGVyc29uIjpbMCw3NTAsMTUwMF0sIkNsZWFuZXIiOlsxMDAwLDAsNTAwXX0sIlRveSBTaG9wIjp7IlNhbGVzIEFzc2lzdGFudCI6WzI1MDAsMCw1MDAwXSwiQ2xlYW5lciI6WzI1MDAsMCwxMjUwXSwiU3RvcmUgTWFuYWdlciI6WzAsNTAwMCwxMDAwMF0sIk9mZmljZSBDbGVyayI6WzAsMzc1MCw3NTAwXSwiTWFya2V0aW5nIEV4ZWN1dGl2ZSI6WzAsMTAwMDAsNTAwMF0sIlRyYWluaW5nIEFkdmlzb3IiOlswLDE1MDAwLDc1MDBdLCJTdG9jayBDbGVyayI6WzQwMDAsMCwyMDAwXX0sIkFkdWx0IE5vdmVsdGllcyI6eyJIdW1hbiBSZXNvdXJjZXMiOlswLDEyMDAwLDYwMDBdLCJTZXhwZXJ0IjpbMCwxMDAwMCw1MDAwXSwiU3RvcmUgTWFuYWdlciI6WzAsNDAwMCw4MDAwXSwiTWFya2V0aW5nIE1hbmFnZXIiOlswLDgwMDAsNDAwMF0sIlJlY2VwdGlvbmlzdCI6WzAsMzAwMCw2MDAwXSwiU2FsZXMgQXNzaXN0YW50IjpbMjAwMCwwLDQwMDBdLCJDbGVhbmVyIjpbMjAwMCwwLDEwMDBdfSwiQ3liZXIgQ2FmZSI6eyJDYXNoaWVyIjpbMCw1MDAwLDEwMDAwXSwiQ2xlYW5lciI6WzUwMDAsMCwyNTAwXSwiTWFuYWdlciI6WzAsMTAwMDAsMjAwMDBdLCJSZWNlcHRpb25pc3QiOlswLDc1MDAsMTUwMDBdLCJNYXJrZXRlciI6WzAsMjAwMDAsMTAwMDBdLCJUZWFjaGVyIjpbMCwzMDAwMCwxNTAwMF0sIkFkbWluaXN0cmF0b3IiOlswLDIwMDAwLDEwMDAwXSwiVGVjaG5pY2lhbiI6Wzg3NTAsMTc1MDAsMF19LCJHcm9jZXJ5IFN0b3JlIjp7IkNhc2hpZXIiOlszMDAwLDAsNjAwMF0sIlN0b2NrIENsZXJrIjpbNDUwMCwwLDIyNTBdLCJDbGVhbmVyIjpbMzAwMCwwLDE1MDBdLCJNYW5hZ2VyIjpbMCw2MDAwLDEyMDAwXSwiQWNjb3VudGFudCI6WzAsNDUwMCw5MDAwXSwiTWFya2V0ZXIiOlswLDEyMDAwLDYwMDBdLCJUcmFpbmVyIjpbMCwxODAwMCw5MDAwXSwiRGVsaXZlcnkgRHJpdmVyIjpbNzUwMCwwLDM3NTBdLCJDYXJ0IEF0dGVuZGFudCI6WzMwMDAsMCwxNTAwXX0sIlRoZWF0ZXIiOnsiVGlja2V0aW5nIEFnZW50IjpbMCwxMDAwMCwyMDAwMF0sIlRlY2huaWNpYW4iOls2MDAwMCwzMDAwMCwwXSwiUHJvZ3JhbW1lciI6WzAsNTAwMDAsMjUwMDBdLCJKYW5pdG9yIjpbMjAwMDAsMCwxMDAwMF0sIk1hbmFnZXIiOlswLDQwMDAwLDgwMDAwXSwiQWNjb3VudGFudCI6WzAsMzAwMDAsNjAwMDBdLCJNYXJrZXRpbmcgTWFuYWdlciI6WzAsODAwMDAsNDAwMDBdLCJVc2hlciI6WzEwMDAwLDAsMjAwMDBdfSwiU3dlZXQgU2hvcCI6eyJDb25mZWN0aW9uaXN0IjpbMCwyNTAwLDEyNTBdLCJQYWNrYWdlciI6Wzc1MCwwLDE1MDBdLCJDbGVhbmVyIjpbMTAwMCwwLDUwMF0sIk1hbmFnZXIiOlswLDIwMDAsNDAwMF0sIkJvb2trZWVwZXIiOlswLDE1MDAsMzAwMF0sIk1hcmtldGVyIjpbMCw0MDAwLDIwMDBdLCJDbGVyayI6WzEwMDAsMCwyMDAwXX0sIkNydWlzZSBMaW5lIjp7IkNhcHRhaW4iOlswLDE1NDUwMCw3NzI1MF0sIkZpcnN0IE9mZmljZXIiOlswLDEwNTAwMCw1MjUwMF0sIkRvY3RvciI6WzAsMTAzMDAwLDUxNTAwXSwiU3BlY2lhbGlzdCI6WzAsOTAwMDAsNDUwMDBdLCJCb3N1biI6WzAsMzcwMDAsNzQwMDBdLCJNYXJrZXRlciI6WzAsNzIwMDAsMzYwMDBdLCJDaGVmIjpbMCw2NDUwMCwzMjI1MF0sIkVuZ2luZWVyIjpbNTQ1MDAsMjcyNTAsMF0sIlJlY2VwdGlvbmlzdCI6WzAsMjEwMDAsNDIwMDBdLCJTdGV3YXJkIjpbMCwyMDc1MCw0MTUwMF0sIkJhcnRlbmRlciI6WzE5MjUwLDAsMzg1MDBdLCJEZWNraGFuZCI6WzI2MDAwLDAsMTMwMDBdLCJUaWNrZXQgQWdlbnQiOlswLDEzMDAwLDI2MDAwXX0sIlRlbGV2aXNpb24gTmV0d29yayI6eyJQcm9kdWNlciI6WzAsOTkwMDAsNDk1MDBdLCJQcm9ncmFtbWVyIjpbMCw2NjAwMCwzMzAwMF0sIkNhbWVyYSBPcGVyYXRvciI6WzI0NzUwLDQ5NTAwLDBdLCJTYWxlcyBFeGVjdXRpdmUiOlswLDI0NzUwLDQ5NTAwXSwiQ2xlYW5lciI6WzMzMDAwLDAsMTY1MDBdLCJBdHRvcm5leSI6WzAsMTMyMDAwLDY2MDAwXSwiU2VjcmV0YXJ5IjpbMCw0OTUwMCw5OTAwMF0sIk1hcmtldGVyIjpbMCwxMzIwMDAsNjYwMDBdLCJXcml0ZXIiOlswLDExNTUwMCw1Nzc1MF0sIlN0YWdlaGFuZCI6WzMzMDAwLDAsMTY1MDBdLCJBbmNob3IiOlswLDEzMjAwMCw2NjAwMF0sIlJlcG9ydGVyIjpbMCw4MjUwMCw0MTI1MF19LCJab28iOnsiWm9vIEtlZXBlciI6WzU4MDAwLDAsMjkwMDBdLCJBbmltYWwgVHJhaW5lciI6WzM2MjUwLDcyNTAwLDBdLCJBcXVhcmlzdCI6WzAsMjkwMDAsNTgwMDBdLCJJbnRlcm4iOlsxNDUwMCwwLDcyNTBdLCJNYW5hZ2VyIjpbMCw1ODAwMCwxMTYwMDBdLCJCb29ra2VlcGVyIjpbMCw0MzUwMCw4NzAwMF0sIlBob3RvZ3JhcGhlciI6WzAsMTE2MDAwLDU4MDAwXSwiQ29uc3VsdGFudCI6WzAsMTc0MDAwLDg3MDAwXSwiVmV0ZXJpbmFyaWFuIjpbNTgwMDAsMTE2MDAwLDBdLCJDYXNoaWVyIjpbMCwxNDUwMCwyOTAwMF19LCJBbXVzZW1lbnQgUGFyayI6eyJJbnNwZWN0b3IiOlswLDEzNTAwMCw2NzUwMF0sIk1hbmFnZXIiOlswLDQ1MDAwLDkwMDAwXSwiTWFya2V0ZXIiOlswLDkwMDAwLDQ1MDAwXSwiU2VjdXJpdHkgR3VhcmQiOls3OTAwMCwwLDM5NTAwXSwiTWVjaGFuaWMiOls2NzUwMCwzMzc1MCwwXSwiQWNjb3VudGFudCI6WzAsMzM3NTAsNjc1MDBdLCJSaWRlIEF0dGVuZGFudCI6WzAsMjI1MDAsNDUwMDBdLCJFbnRlcnRhaW5lciI6WzM0MDAwLDAsMTcwMDBdLCJUaWNrZXQgQWdlbnQiOlswLDExMjUwLDIyNTAwXSwiSmFuaXRvciI6WzIyNTAwLDAsMTEyNTBdfSwiRnVybml0dXJlIFN0b3JlIjp7IlNhbGVzIENsZXJrIjpbMCwzMjUwLDY1MDBdLCJEZWxpdmVyeSBEcml2ZXIiOls4MDAwLDAsNDAwMF0sIkFwcHJlbnRpY2UiOlswLDc1MCwxNTAwXSwiQ2xlYW5lciI6WzM1MDAsMCwxNzUwXSwiTWFuYWdlciI6WzAsNjUwMCwxMzAwMF0sIlJlY2VwdGlvbmlzdCI6WzAsNTAwMCwxMDAwMF0sIk1hcmtldGVyIjpbMCwxMzAwMCw2NTAwXSwiVHJhaW5lciI6WzAsMTk1MDAsOTc1MF19LCJHYXMgU3RhdGlvbiI6eyJBdHRlbmRhbnQiOlswLDEzMDAwLDI2MDAwXSwiQ2xlYW5lciI6WzE3NTAwLDAsODc1MF0sIk1hbmFnZXIiOlswLDMwMDAwLDYwMDAwXSwiTWFya2V0ZXIiOlswLDQwMDAwLDIwMDAwXSwiVHJhaW5lciI6WzAsNzA1MDAsMzUyNTBdfSwiTXVzaWMgU3RvcmUiOnsiU2FsZXMgQXNzaXN0YW50IjpbMCwxNzUwLDM1MDBdLCJNdXNpY2lhbiI6WzQ1MDAsOTAwMCwwXSwiU2FsZXMgQXBwcmVudGljZSI6WzAsNTAwLDEwMDBdLCJDbGVhbmVyIjpbMjAwMCwwLDEwMDBdLCJTdXBlcnZpc29yIjpbMCwzNTAwLDcwMDBdLCJCb29ra2VlcGVyIjpbMCwyNzUwLDU1MDBdLCJUcmFpbmVyIjpbMCwxMDUwMCw1MjUwXX0sIk5pZ2h0Y2x1YiI6eyJCYXJ0ZW5kZXIiOlsxMzUwMCwwLDI3MDAwXSwiQm91bmNlciI6WzQ4MDAwLDAsMjQwMDBdLCJCYXJiYWNrIjpbMTAyNTAsMCwyMDUwMF0sIkNsZWFuZXIiOlsxMzUwMCwwLDY3NTBdLCJNYW5hZ2VyIjpbMCwyNzAwMCw1NDAwMF0sIlBlcnNvbmFsIEFzc2lzdGFudCI6WzAsMjAyNTAsNDA1MDBdLCJQcm9tb3RlciI6WzAsNTQwMDAsMjcwMDBdLCJUcmFpbmVyIjpbMCw4MTAwMCw0MDUwMF0sIkRpc2stam9ja2V5IjpbMCw0MDUwMCwyMDI1MF19LCJQdWIiOnsiQmFydGVuZGVyIjpbMTUwMCwwLDMwMDBdLCJCb3VuY2VyIjpbNjAwMCwwLDMwMDBdLCJXYWl0ZXIiOlsxNTAwLDAsMzAwMF0sIkNsZWFuZXIiOlsxNTAwLDAsNzUwXSwiTWFuYWdlciI6WzAsMzAwMCw2MDAwXSwiQm9va2tlZXBlciI6WzAsMjI1MCw0NTAwXSwiVHJhaW5lciI6WzAsOTAwMCw0NTAwXSwiUHJvbW90ZXIiOlswLDYwMDAsMzAwMF19LCJSZXN0YXVyYW50Ijp7IldhaXRlciI6WzEyNTAsMCwyNTAwXSwiU291cyBDaGVmIjpbMCw0MDAwLDIwMDBdLCJIZWFkIENoZWYiOlswLDI1MDAsNTAwMF0sIktpdGNoZW4gQXNzaXN0YW50IjpbMTUwMCwwLDc1MF0sIkhlYWQgV2FpdGVyIjpbMCwyMDAwLDQwMDBdLCJMaW5lIENvb2siOlsxMjUwLDI1MDAsMF0sIkNoZWYiOlsxNTAwLDMwMDAsMF0sIkFwcHJlbnRpY2UgQ2hlZiI6Wzc1MCwxNTAwLDBdLCJEaXNod2FzaGVyIjpbMTUwMCwwLDc1MF19LCJTb2Z0d2FyZSBDb3Jwb3JhdGlvbiI6eyJEZXZlbG9wZXIiOlswLDI0MDAwLDEyMDAwXSwiVGVzdGVyIjpbMCwxMjAwMCw2MDAwXSwiR3JhcGhpYyBEZXNpZ25lciI6WzAsMTgwMDAsOTAwMF0sIkFwcHJlbnRpY2UiOlswLDYwMDAsMzAwMF0sIkNsZWFuZXIiOlsxMjAwMCwwLDYwMDBdLCJMZWFkIERldmVsb3BlciI6WzAsMjQwMDAsNDgwMDBdLCJBbmFseXN0IjpbMCwxODAwMCwzNjAwMF0sIk1hcmtldGVyIjpbMCw0ODAwMCwyNDAwMF0sIkNvbnN1bHRhbnQiOlswLDcyMDAwLDM2MDAwXX0sIk1lY2hhbmljIFNob3AiOnsiVGVjaG5pY2lhbiI6Wzg1MDAsMCw0MjUwXSwiQXBwcmVudGljZSBUZWNobmljaWFuIjpbMjAwMCwwLDEwMDBdLCJDbGVhbmVyIjpbNDUwMCwwLDIyNTBdLCJNYW5hZ2VyIjpbMCw4NTAwLDE3MDAwXSwiUmVjZXB0aW9uaXN0IjpbMCw2NTAwLDEzMDAwXSwiVHJhaW5lciI6WzAsMjU1MDAsMTI3NTBdfSwiRml0bmVzcyBDZW50ZXIiOnsiUGVyc29uYWwgVHJhaW5lciI6WzMxMDAwLDAsMTU1MDBdLCJTd2ltbWluZyBJbnN0cnVjdG9yIjpbMjMyNTAsMCw0NjUwMF0sIkxpZmVndWFyZCI6WzE5NTAwLDAsMzkwMDBdLCJDbGVhbmVyIjpbMTU1MDAsMCw3NzUwXSwiTWFuYWdlciI6WzAsMzEwMDAsNjIwMDBdLCJSZWNlcHRpb25pc3QiOlswLDUwMDAsMTAwMDBdLCJNYXJrZXRlciI6WzAsNjIwMDAsMzEwMDBdLCJIdW1hbiBSZXNvdXJjZXMiOlswLDIzMjUwLDQ2NTAwXSwiTnV0cml0aW9uaXN0IjpbMjcyNTAsNTQ1MDAsMF0sIkZpdG5lc3MgSW5zdHJ1Y3RvciI6WzQ2NTAwLDAsMjMyNTBdfSwiTGluZ2VyaWUgU3RvcmUiOnsiU2FsZXNwZXJzb24iOlswLDIyNTAsNDUwMF0sIkNsZWFuZXIiOlsyNTAwLDAsMTI1MF0sIlN0b3JlIE1hbmFnZXIiOlswLDQ1MDAsOTAwMF0sIkxpbmdlcmllIE1vZGVsIjpbMCw5MDAwLDQ1MDBdLCJIdW1hbiBSZXNvdXJjZXMiOlswLDEzNTAwLDY3NTBdLCJUcmFpbmVlIjpbMCw1MDAsMTAwMF19LCJGYXJtIjp7IkhhcnZlc3RlciI6WzE0MDAwLDAsNzAwMF0sIkRlbGl2ZXJ5IERyaXZlciI6WzIzMDAwLDAsMTE1MDBdLCJIZXJkc3BlcnNvbiI6WzE4NTAwLDAsOTI1MF0sIkZhcm0gTWFuYWdlciI6WzAsMTg1MDAsMzcwMDBdLCJCb29ra2VlcGVyIjpbMCwxNDAwMCwyODAwMF0sIkNvbnN1bHRhbnQiOlswLDU1NTAwLDI3NzUwXSwiUmV0YWlsZXIiOlswLDE4NTAwLDkyNTBdLCJEYWlyeSBGYXJtZXIiOlsyMzAwMCwwLDExNTAwXSwiUG91bHRyeSBGYXJtZXIiOlsxODUwMCwwLDkyNTBdfSwiTWluaW5nIENvcnBvcmF0aW9uIjp7IlNhbGVzIEV4ZWN1dGl2ZSI6WzAsODMwMDAsNDE1MDBdLCJNaWxsIE9wZXJhdG9yIjpbNzUwMDAsMCwzNzUwMF0sIlByb2R1Y3Rpb24gRm9yZW1hbiI6WzM5NTAwLDAsNzkwMDBdLCJNaW5lIEVuZ2luZWVyIjpbMCw4MTAwMCw0MDUwMF0sIkVsZWN0cmljaWFuIjpbMzkwMDAsMCw3ODAwMF0sIlNhZmV0eSBJbnNwZWN0b3IiOls0NzUwMCw5NTAwMCwwXSwiU2l0ZSBNYW5hZ2VyIjpbMCw5NzAwMCw0ODc1MF0sIlNlY3JldGFyeSI6WzAsMzkwMDAsNzgwMDBdfSwiT2lsIFJpZyI6eyJEcmlsbGVyIjpbMTUwMDAwLDc1MDAwLDBdLCJSb3VnaG5lY2siOls3NTAwMCwwLDM3NTAwXSwiRGVycmljayBIYW5kIjpbOTQwMDAsMCw0NzAwMF0sIlNlY3JldGFyeSI6WzAsNTYyNTAsMTEyNTAwXSwiSW5zcGVjdG9yIjpbMCwyMjUwMDAsMTEyNTAwXSwiU2FsZXMgRXhlY3V0aXZlIjpbMCwxMzE1MDAsNjU3NTBdLCJNb3RvciBIYW5kIjpbMTEyNTAwLDU2MjUwLDBdfSwiUHJvcGVydHkgQnJva2VyIjp7IlByb3BlcnR5IEJyb2tlciI6WzAsNzUwLDE1MDBdLCJWYWx1YXRpb24gU3BlY2lhbGlzdCI6WzAsMzAwMCwxNTAwXSwiQXNzb2NpYXRlIEJyb2tlciI6WzAsMjUwLDUwMF0sIkNsZWFuZXIiOlsxMDAwLDAsNTAwXSwiVGVhbSBNYW5hZ2VyIjpbMCwxNTAwLDMwMDBdLCJSZWNlcHRpb25pc3QiOlswLDEyNTAsMjUwMF0sIkdyYXBoaWMgRGVzaWduZXIiOlswLDMwMDAsMTUwMF0sIkJyb2tlciBTdXBwb3J0IjpbMCw0NTAwLDIyNTBdfSwiUHJpdmF0ZSBTZWN1cml0eSBGaXJtIjp7IlNlY3VyaXR5IENvbnRyYWN0b3IiOls3MDAwMCwwLDM1MDAwXSwiVGVhbSBMZWFkZXIiOlsxMTAwMDAsMCw1NTAwMF0sIkRlZmVuY2UgQ29uc3VsdGFudCI6WzAsMTM1MDAwLDY3NTAwXSwiU3Bva2VzcGVyc29uIjpbMCw4MDAwMCw0MDAwMF0sIkNvbXBhbnkgTGlhaXNvbiI6WzAsNTc1MDAsMTE1MDAwXSwiQ2hpZWYgU3RyYXRlZ2lzdCI6WzAsMTY1MDAwLDgyNTAwXSwiUmVjb25uYWlzc2FuY2UiOls4MDAwMCw0MDAwMCwwXSwiRGlzcG9zYWwgRW5naW5lZXIiOlswLDg1MDAwLDQyNTAwXSwiQXJtb3VyZXIiOls0MDAwMCwwLDgwMDAwXSwiTWVkaWMiOlswLDkwMDAwLDQ1MDAwXSwiQ29tbXMgRW5naW5lZXIiOlswLDg1MDAwLDQyNTAwXX0sIkRldGVjdGl2ZSBBZ2VuY3kiOnsiUHJpdmF0ZSBJbnZlc3RpZ2F0b3IiOlsyMjUwMCw0NTUwMCwwXSwiVHJhaW5lZSBJbnZlc3RpZ2F0b3IiOlsxNDAwMCwyODAwMCwwXSwiU2VjcmV0YXJ5IjpbMTI1MDAsMCwyNTAwMF0sIkludGVsbGlnZW5jZSBBbmFseXN0IjpbMCw1ODAwMCwyOTAwMF0sIlN1cnZlaWxsYW5jZSI6WzI2MDAwLDUyMDAwLDBdLCJDaGllZiBJbnZlc3RpZ2F0b3IiOls0MDAwMCw4MDAwMCwwXSwiQ2xpZW50IExpYWlzb24iOlswLDYyMDAwLDMxMDAwXX0sIkZpcmV3b3JrIFN0YW5kIjp7IlNhbGVzcGVyc29uIjpbMCw1MDAsMTAwMF0sIlB5cm90ZWNobmljaWFuIjpbMzAwMCwxNTAwLDBdLCJQaWNrZXIgIFBhY2tlciI6WzUwMCwwLDI1MF0sIk1hbmFnZXIiOlswLDEwMDAsMjAwMF0sIkJvb2trZWVwZXIiOlswLDc1MCwxNTAwXSwiQWR2ZXJ0aXNpbmcgTWFuYWdlciI6WzAsMjAwMCwxMDAwXSwiVHJhaW5lciI6WzAsMzAwMCwxNTAwXX0sIk1lYXQgV2FyZWhvdXNlIjp7IlF1YWxpdHkgQ29udHJvbGxlciI6WzEyNTAwLDI1MDAwLDBdLCJQYWNrZXIiOls5NTAwLDAsNDc1MF0sIkFwcHJlbnRpY2UgQnV0Y2hlciI6WzMwMDAsMCwxNTAwXSwiQ2xlYW5lciI6WzY1MDAsMCwzMjUwXSwiTWFuYWdlciI6WzAsMTI1MDAsMjUwMDBdLCJBc3Npc3RhbnQiOlswLDk1MDAsMTkwMDBdLCJTdXBlcnZpc29yIjpbMCwzNzUwMCwxODc1MF0sIkJ1dGNoZXIiOlsxMjUwMCwwLDYyNTBdLCJSZXRhaWxlciI6WzAsMTI1MDAsNjI1MF19LCJMb2dpc3RpY3MgTWFuYWdlbWVudCI6eyJMdW1wZXIiOls0NTAwMCwwLDIyNTAwXSwiRHJpdmVyIjpbMjg3NTAsMCw1NzUwMF0sIkZvcmtsaWZ0IE9wZXJhdG9yIjpbMzAwMDAsMCw2MDAwMF0sIlRyYW5zcG9ydCBDb29yZGluYXRvciI6WzAsODUwMDAsNDI1MDBdLCJXYXJlaG91c2UgTWFuYWdlciI6WzAsMTE1MDAwLDU3NTAwXSwiU2hpZnQgTWFuYWdlciI6WzAsOTAwMDAsNDUwMDBdLCJTdXBwbHkgQ2hhaW4gTWFuYWdlciI6WzAsMTI1MDAwLDYyNTAwXSwiUHJvY3VyZW1lbnQgTWFuYWdlciI6WzAsMTQwMDAwLDcwMDAwXX0sIkdlbnRzIFN0cmlwIENsdWIiOnsiU3RyaXBwZXIiOls3MjUwLDAsMTQ1MDBdLCJTZWN1cml0eSI6WzI5MDAwLDAsMTQ1MDBdLCJDbGVhbmVyIjpbNzUwMCwwLDM3NTBdLCJNYW5hZ2VyIjpbMCwxNDUwMCwyOTAwMF0sIkJvb2trZWVwZXIiOlswLDExMDAwLDIyMDAwXSwiUGhvdG9ncmFwaGVyIjpbMCwyOTAwMCwxNDUwMF19fQ==";
     const decodeBase64Text = (value) => {
         if (typeof atob === "function") return atob(value);
@@ -172,7 +174,16 @@
     };
     const POSITION_REQUIREMENTS = (() => {
         try {
-            return Object.freeze(JSON.parse(decodeBase64Text(POSITION_REQUIREMENTS_B64)));
+            const decoded = JSON.parse(decodeBase64Text(POSITION_REQUIREMENTS_B64));
+            Object.values(decoded).forEach((positions) => {
+                Object.entries(positions || {}).forEach(([name, requirements]) => {
+                    const normalized = normalizedPositionName(name);
+                    if (normalized === name) return;
+                    positions[normalized] = requirements;
+                    delete positions[name];
+                });
+            });
+            return Object.freeze(decoded);
         } catch {
             return Object.freeze({});
         }
@@ -246,6 +257,32 @@
     const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
     const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const canonicalName = (value) => String(value || "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+    const migratePositionAliases = (settings = {}) => {
+        if (!isObject(settings)) return {};
+        const migrateAssignments = (assignments) => Object.fromEntries(Object.entries(isObject(assignments) ? assignments : {}).map(([key, value]) => [
+            key,
+            isObject(value) ? migrateAssignments(value) : typeof value === "string" ? normalizedPositionName(value) : value
+        ]));
+        const migrateCapacities = (capacities) => Object.fromEntries(Object.entries(isObject(capacities) ? capacities : {}).map(([companyId, positions]) => {
+            if (!isObject(positions)) return [companyId, positions];
+            const migrated = {};
+            Object.entries(positions).forEach(([position, limit]) => {
+                const normalized = normalizedPositionName(position);
+                if (!hasOwn(migrated, normalized) || position === normalized) migrated[normalized] = limit;
+            });
+            return [companyId, migrated];
+        }));
+        const migratePriorities = (priorities) => Object.fromEntries(Object.entries(isObject(priorities) ? priorities : {}).map(([companyId, positions]) => [
+            companyId,
+            Array.isArray(positions) ? [...new Set(positions.map(normalizedPositionName))] : positions
+        ]));
+        return {
+            ...settings,
+            ...(hasOwn(settings, "assignments") ? { assignments: migrateAssignments(settings.assignments) } : {}),
+            ...(hasOwn(settings, "positionCapacities") ? { positionCapacities: migrateCapacities(settings.positionCapacities) } : {}),
+            ...(hasOwn(settings, "positionPriority") ? { positionPriority: migratePriorities(settings.positionPriority) } : {})
+        };
+    };
     const positionRequirementsFor = (companyType, position) => {
         const typeName = Object.keys(POSITION_REQUIREMENTS).find((name) => canonicalName(name) === canonicalName(companyType));
         const roles = typeName ? POSITION_REQUIREMENTS[typeName] : null;
@@ -357,17 +394,18 @@
         return String(a ?? "").localeCompare(String(b ?? ""), undefined, { numeric: true }) * (dir === "asc" ? 1 : -1);
     });
     const deepMergeSettings = (raw) => {
+        const source = migratePositionAliases(isObject(raw) ? raw : {});
         const merged = {
             ...DEFAULT_SETTINGS,
-            ...(isObject(raw) ? raw : {}),
-            companyAccounts: companyAccountMap(raw),
-            activeCompanyId: normalizeCompanyId(raw?.activeCompanyId),
-            dailyAlertMode: ["off", "combined", "separate", "selected"].includes(raw?.dailyAlertMode) ? raw.dailyAlertMode : "off",
-            sourceTimes: isObject(raw?.sourceTimes) ? raw.sourceTimes : {},
-            assignments: isObject(raw?.assignments) ? raw.assignments : {},
-            lockedEmployees: isObject(raw?.lockedEmployees) ? raw.lockedEmployees : {},
-            positionCapacities: isObject(raw?.positionCapacities) ? raw.positionCapacities : {},
-            positionPriority: isObject(raw?.positionPriority) ? raw.positionPriority : {}
+            ...source,
+            companyAccounts: companyAccountMap(source),
+            activeCompanyId: normalizeCompanyId(source.activeCompanyId),
+            dailyAlertMode: ["off", "combined", "separate", "selected"].includes(source.dailyAlertMode) ? source.dailyAlertMode : "off",
+            sourceTimes: isObject(source.sourceTimes) ? source.sourceTimes : {},
+            assignments: isObject(source.assignments) ? source.assignments : {},
+            lockedEmployees: isObject(source.lockedEmployees) ? source.lockedEmployees : {},
+            positionCapacities: isObject(source.positionCapacities) ? source.positionCapacities : {},
+            positionPriority: isObject(source.positionPriority) ? source.positionPriority : {}
         };
         // Legacy flat keys are only read once while building a validated Company-ID account.
         delete merged.tornKey;
@@ -1884,7 +1922,8 @@
         const period = asFinite(entry.period);
         if (period !== null) {
             const periodDate = new Date(period);
-            if (periodDate.getUTCHours() === DAILY_TICK_HOUR_UTC && (periodDate.getUTCMinutes() === 5 || periodDate.getUTCMinutes() === DAILY_SYNC_MINUTE_UTC)) {
+            // Preserve the UTC date encoded by every historical Company reporting boundary.
+            if (periodDate.getUTCHours() === DAILY_TICK_HOUR_UTC && [0, 5, DAILY_SYNC_MINUTE_UTC].includes(periodDate.getUTCMinutes())) {
                 return utcDayKey(period);
             }
         }
@@ -1947,9 +1986,9 @@
         const profile = data?.profile;
         if (!profile?.id) return;
         const id = String(profile.id);
-        const period = reportingPeriod();
-        const reportingDay = dailySyncDay();
-        const capturedAt = Date.now();
+        const capturedAt = asFinite(data?.fetchedAt) ?? Date.now();
+        const period = reportingPeriod(capturedAt);
+        const reportingDay = dailySyncDay(capturedAt);
         const history = companyHistory(id);
         const priorSnapshots = history.filter((entry) => historySnapshotDay(entry, period) === reportingDay);
         const existingSnapshot = priorSnapshots.sort((left, right) => historySnapshotTimestamp(left) - historySnapshotTimestamp(right)).reduce((merged, entry) => merged ? mergeHistorySnapshot(merged, entry) : entry, null);
@@ -4335,7 +4374,7 @@
 
     const testApi = {
         reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials,
-        roleStatEfficiency, calculateLocalRoleEfficiencies, localRoleTotalEfficiency, applicationStatusSummary,
+        roleStatEfficiency, calculateLocalRoleEfficiencies, localRoleTotalEfficiency, applicationStatusSummary, migratePositionAliases,
         companyAccountMap, selectableCompanyOptions, normalizeCacheByCompany, cacheEnvelope, migrateLegacyCompanyStores,
         dailySyncDay, dailySyncNeedsRun, dailySyncPlan, historySnapshotDay, mergeHistorySnapshot, normalizeHistory, alertTargetsForMode, sourceFreshness, tabFreshnessSummary,
         layoutProfile, runtimeKind, runtimeMode, launcherTapActivates, canStartHeaderDrag,

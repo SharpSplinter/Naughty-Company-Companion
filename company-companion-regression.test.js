@@ -4,6 +4,10 @@ const path = require("node:path");
 const test = require("node:test");
 const companion = require("./Naughty Company Companion.user.js");
 const source = fs.readFileSync(path.join(__dirname, "Naughty Company Companion.user.js"), "utf8");
+
+test("userscript version remains safe in the Node regression runtime", () => {
+    assert.match(source, /const VERSION = typeof GM_info !== "undefined"/);
+});
 const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Company-Companion/);
 assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Company-Companion\/main/);
@@ -208,14 +212,31 @@ test("alert delivery modes select no, all-combined, all-separate, or only active
 });
 
 test("reporting day rolls over at 18:10 UTC", () => {
-    const before = Date.UTC(2026, 7, 18, 18, 9, 59);
-    const after = Date.UTC(2026, 7, 18, 18, 10, 0);
+    const beforeSync = Date.UTC(2026, 7, 18, 18, 9, 59);
+    const syncTick = Date.UTC(2026, 7, 18, 18, 10, 0);
 
-    assert.equal(companion.reportingPeriod(before), Date.UTC(2026, 7, 17, 18, 10, 0));
-    assert.equal(companion.reportingPeriod(after), after);
+    assert.equal(companion.reportingPeriod(beforeSync), Date.UTC(2026, 7, 17, 18, 10, 0));
+    assert.equal(companion.reportingPeriod(syncTick), syncTick);
+    assert.equal(companion.dailySyncDay(beforeSync), "2026-08-17");
+    assert.equal(companion.dailySyncDay(syncTick), "2026-08-18");
+    assert.match(source, /const capturedAt = asFinite\(data\?\.fetchedAt\) \?\? Date\.now\(\);/);
+    assert.match(source, /const reportingDay = dailySyncDay\(capturedAt\);/);
 });
 
-test("daily snapshot history is de-duplicated by reporting day across the 18:05 to 18:10 migration", () => {
+test("daily snapshot history is de-duplicated across the 18:00, 18:05, and 18:10 reporting boundaries", () => {
+    const priorDay = {
+        period: Date.UTC(2026, 7, 23, 18, 10, 0),
+        reportingDay: "2026-08-23",
+        capturedAt: Date.UTC(2026, 7, 23, 18, 10, 10),
+        dailyIncome: 800,
+        weeklyIncome: 5600
+    };
+    const original = {
+        period: Date.UTC(2026, 7, 24, 18, 0, 0),
+        capturedAt: Date.UTC(2026, 7, 24, 18, 0, 10),
+        dailyIncome: 900,
+        weeklyIncome: 6300
+    };
     const legacy = {
         period: Date.UTC(2026, 7, 24, 18, 5, 0),
         capturedAt: Date.UTC(2026, 7, 24, 18, 5, 10),
@@ -230,16 +251,19 @@ test("daily snapshot history is de-duplicated by reporting day across the 18:05 
         stockAvailable: true,
         stock: { 1: { inStock: 12, onOrder: 0 } }
     };
-    const normalized = companion.normalizeHistory({ 101: [legacy, current] })[101];
+    const normalized = companion.normalizeHistory({ 101: [priorDay, original, legacy, current] })[101];
 
+    assert.equal(companion.historySnapshotDay(original), "2026-08-24");
     assert.equal(companion.historySnapshotDay(legacy), "2026-08-24");
     assert.equal(companion.historySnapshotDay(current), "2026-08-24");
-    assert.equal(normalized.length, 1);
-    assert.equal(normalized[0].reportingDay, "2026-08-24");
-    assert.equal(normalized[0].period, current.period);
-    assert.equal(normalized[0].dailyIncome, 1000);
-    assert.equal(normalized[0].dailyProfit, 800);
-    assert.equal(normalized[0].stock[1].inStock, 12);
+    assert.equal(normalized.length, 2);
+    assert.equal(normalized[0].reportingDay, "2026-08-23");
+    assert.equal(normalized[0].dailyIncome, 800);
+    assert.equal(normalized[1].reportingDay, "2026-08-24");
+    assert.equal(normalized[1].period, current.period);
+    assert.equal(normalized[1].dailyIncome, 1000);
+    assert.equal(normalized[1].dailyProfit, 800);
+    assert.equal(normalized[1].stock[1].inStock, 12);
     assert.match(source, /const priorSnapshots = history\.filter\(\(entry\) => historySnapshotDay\(entry, period\) === reportingDay\);/);
     assert.match(source, /mergeHistorySnapshot\(existingSnapshot, row\)/);
 });
