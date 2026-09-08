@@ -1,15 +1,15 @@
 // ==UserScript==
-// @name         Naughty Company Companion
+// @name         Naughty Company Companion Beta
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.42-beta.1
+// @version      1.3.42-beta.2
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
 // @match        https://www.torn.com/companies.php*
 // @run-at       document-start
-// @source       https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/main/Naughty%20Company%20Companion.user.js
-// @updateURL    https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/main/Naughty%20Company%20Companion.user.js
-// @downloadURL  https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/main/Naughty%20Company%20Companion.user.js
+// @source       https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/test/Naughty%20Company%20Companion%20beta.user.js
+// @updateURL    https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/test/Naughty%20Company%20Companion%20beta.user.js
+// @downloadURL  https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/test/Naughty%20Company%20Companion%20beta.user.js
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -26,7 +26,7 @@
 (() => {
     "use strict";
 
-    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.1";
+    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.2";
 
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";

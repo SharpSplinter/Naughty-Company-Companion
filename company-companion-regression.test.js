@@ -2,15 +2,15 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const companion = require("./Naughty Company Companion.user.js");
-const source = fs.readFileSync(path.join(__dirname, "Naughty Company Companion.user.js"), "utf8");
+const companion = require("./Naughty Company Companion beta.user.js");
+const source = fs.readFileSync(path.join(__dirname, "Naughty Company Companion beta.user.js"), "utf8");
 
 test("userscript version remains safe in the Node regression runtime", () => {
     assert.match(source, /const VERSION = typeof GM_info !== "undefined"/);
 });
 const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Company-Companion/);
-assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Company-Companion\/main/);
+assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Company-Companion\/test\/Naughty%20Company%20Companion%20beta\.user\.js/);
 assert.match(source, /@license\s+MIT/);
 assert.doesNotMatch(source + readme, /xf4k31tx/);
 

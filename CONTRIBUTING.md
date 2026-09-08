@@ -28,7 +28,7 @@ Use the feature-request form. Explain the Torn workflow it improves, who benefit
 5. Run the repository checks before opening a pull request:
 
    ```powershell
-   node --check "Naughty Company Companion.user.js"
+   node --check "Naughty Company Companion beta.user.js"
    node --test company-companion-regression.test.js
    ```
 

@@ -116,7 +116,7 @@ The main panel owns vertical page flow, including the full Same-type companies r
 Reopen the raw userscript URL in your userscript manager to update.
 
 ```powershell
-node --check "Naughty Company Companion.user.js"
+node --check "Naughty Company Companion beta.user.js"
 node --test company-companion-regression.test.js
 ```
 
