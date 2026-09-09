@@ -57,7 +57,7 @@ Every active Naughty companion follows the [Naughty Companion GUI/UX/UI Standard
 2. Open the [raw userscript](https://raw.githubusercontent.com/SharpSplinter/Naughty-Company-Companion/main/Naughty%20Company%20Companion.user.js) and install it.
 3. Reload Torn and open the panel from the chess-piece launcher, or press <kbd>Alt</kbd>+<kbd>C</kbd>.
 4. In **Settings**, select **Add company…**, paste a Limited-access Director key, and select **Validate and add company**.
-5. Use the header selector to switch companies. On TornPDA, the app-provided default or dedicated userscript API key is detected automatically and used transiently for the primary company. A manual Limited-access Director key is requested only if that injected key is unavailable, lacks Company Employees access, or you add a secondary company. Desktop/Tampermonkey keeps the normal manual-key flow.
+5. Use the header selector to switch companies. On TornPDA, the app-provided default or dedicated userscript API key is detected automatically and used transiently for the primary company. A manual Limited-access Director key is requested only if that injected key is unavailable, lacks Company Employees access, or you add a secondary company. Desktop/Tampermonkey keeps the normal manual-key flow. Settings always identifies the primary company and displays whether its active source is **TornPDA injected key**, **Custom saved Director key**, or **No usable key**, without displaying the key value.
 
 ## API access and refresh behavior
 

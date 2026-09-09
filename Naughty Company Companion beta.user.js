@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion Beta
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.42-beta.4
+// @version      1.3.42-beta.5
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -26,7 +26,7 @@
 (() => {
     "use strict";
 
-    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.4";
+    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.5";
 
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
@@ -84,6 +84,7 @@
     const DEFAULT_SETTINGS = {
         companyAccounts: {},
         activeCompanyId: "",
+        primaryCompanyId: "",
         dailyAlertMode: "off",
         sourceTimes: {},
         includeStockCost: true,
@@ -376,6 +377,16 @@
         || "";
     const accountForCompany = (companyId = activeCompanyId()) => companyAccountMap(state.settings)[normalizeCompanyId(companyId)] || null;
     const accountKey = (account) => account?.source === "pda" ? injectedTornApiKey() : String(account?.key || "").trim();
+    const primaryDirectorKeyStatus = (settings = state.settings, injectedKey = injectedTornApiKey()) => {
+        const accounts = companyAccountMap(settings);
+        const injectedAccount = Object.values(accounts).find((account) => account.source === "pda") || null;
+        const id = injectedAccount?.id || normalizeCompanyId(settings?.primaryCompanyId) || normalizeCompanyId(settings?.activeCompanyId) || Object.keys(accounts)[0] || "";
+        const account = injectedAccount || accounts[id] || null;
+        if (account?.source === "pda" && injectedKey) return { id: account.id, name: account.name, source: "pda", label: "TornPDA injected key", available: true };
+        if (account?.source !== "pda" && String(account?.key || "").trim()) return { id: account.id, name: account.name, source: "custom", label: "Custom saved Director key", available: true };
+        if (!account && injectedKey) return { id: "", name: "Primary company (detecting…)", source: "pda", label: "TornPDA injected key", available: true };
+        return { id, name: account?.name || "Primary company", source: "none", label: "No usable key", available: false };
+    };
     const activeTornApiKey = () => {
         const activeId = activeCompanyId();
         const account = accountForCompany(activeId);
@@ -411,11 +422,14 @@
     });
     const deepMergeSettings = (raw) => {
         const source = migratePositionAliases(isObject(raw) ? raw : {});
+        const companyAccounts = companyAccountMap(source);
+        const injectedPrimary = Object.values(companyAccounts).find((account) => account.source === "pda")?.id || "";
         const merged = {
             ...DEFAULT_SETTINGS,
             ...source,
-            companyAccounts: companyAccountMap(source),
+            companyAccounts,
             activeCompanyId: normalizeCompanyId(source.activeCompanyId),
+            primaryCompanyId: injectedPrimary || normalizeCompanyId(source.primaryCompanyId) || normalizeCompanyId(source.activeCompanyId) || Object.keys(companyAccounts)[0] || "",
             dailyAlertMode: ["off", "combined", "separate", "selected"].includes(source.dailyAlertMode) ? source.dailyAlertMode : "off",
             sourceTimes: isObject(source.sourceTimes) ? source.sourceTimes : {},
             assignments: isObject(source.assignments) ? source.assignments : {},
@@ -499,6 +513,7 @@
             if (hasOwn(settings, key) && !isObject(settings[key])) backupValidationError(`invalid ${key} setting`);
         });
         if (hasOwn(settings, "activeCompanyId") && typeof settings.activeCompanyId !== "string") backupValidationError("invalid active-company setting");
+        if (hasOwn(settings, "primaryCompanyId") && typeof settings.primaryCompanyId !== "string") backupValidationError("invalid primary-company setting");
         if (hasOwn(settings, "dailyAlertMode") && !["off", "combined", "separate", "selected"].includes(settings.dailyAlertMode)) backupValidationError("invalid alert-mode setting");
         const accounts = isObject(settings.companyAccounts) ? settings.companyAccounts : {};
         const nestedKeyPresent = Object.values(accounts).some((account) => isObject(account) && typeof account.key === "string" && account.key.length > 0);
@@ -2438,7 +2453,8 @@
         const id = snapshot.id;
         const accounts = companyAccountMap(state.settings);
         accounts[id] = snapshot.account;
-        state.settings = deepMergeSettings({ ...state.settings, companyAccounts: accounts, activeCompanyId: state.settings.activeCompanyId || id });
+        const primaryCompanyId = snapshot.account?.source === "pda" ? id : state.settings.primaryCompanyId || state.settings.activeCompanyId || id;
+        state.settings = deepMergeSettings({ ...state.settings, companyAccounts: accounts, activeCompanyId: state.settings.activeCompanyId || id, primaryCompanyId });
         const companySourceTimes = { ...(state.settings.sourceTimes?.[id] || {}), ...snapshot.sourceTimes };
         snapshot.unavailableSources?.forEach((source) => { delete companySourceTimes[source]; });
         state.settings.sourceTimes = {
@@ -3742,11 +3758,14 @@
         const panelRect = panel()?.getBoundingClientRect();
         const runtime = nativeRuntime.isTornPDA ? "TornPDA (native confirmed)" : tornPdaUserAgent(currentUserAgent()) ? "TornPDA (native confirmation pending)" : "Desktop / Tampermonkey";
         const screenSize = `${formatNumber(viewport.width)} × ${formatNumber(viewport.height)} visible${panelRect ? ` · panel ${formatNumber(Math.round(panelRect.width))} × ${formatNumber(Math.round(panelRect.height))}` : ""}`;
+        const primaryKey = primaryDirectorKeyStatus(settings);
+        const primaryKeySummary = `<div class="ncc-kv"><span><b>Primary Director key in use</b><br><small>${escapeHtml(primaryKey.name)}${primaryKey.id ? ` · ID ${formatNumber(primaryKey.id)}` : ""}</small></span><span class="${primaryKey.available ? "ncc-good" : "ncc-bad"}"><b>${escapeHtml(primaryKey.label)}</b><br><small>Key value remains hidden</small></span></div>`;
         const accountRows = Object.values(accounts).sort((left, right) => left.name.localeCompare(right.name)).map((account) => {
             const keyState = account.source === "pda" ? "TornPDA injected" : accountKey(account) ? "Director key saved" : "Director key missing — add again";
-            return `<div class="ncc-kv"><span><b>${escapeHtml(account.name)}</b><br><small>${escapeHtml(account.typeName || "Company")} · ID ${formatNumber(account.id)}</small></span><span>${account.id === activeCompanyId() ? "Current · " : ""}${keyState}<br><button class="ncc-button" data-action="select-company" data-company-id="${escapeHtml(account.id)}">Open</button> <button class="ncc-button ncc-danger" data-action="remove-company" data-company-id="${escapeHtml(account.id)}">Remove</button></span></div>`;
+            const companyRole = account.id === primaryKey.id ? "Primary" : "Secondary";
+            return `<div class="ncc-kv"><span><b>${escapeHtml(account.name)}</b><br><small>${escapeHtml(account.typeName || "Company")} · ID ${formatNumber(account.id)}</small></span><span>${companyRole}${account.id === activeCompanyId() ? " · Current" : ""} · ${keyState}<br><button class="ncc-button" data-action="select-company" data-company-id="${escapeHtml(account.id)}">Open</button> <button class="ncc-button ncc-danger" data-action="remove-company" data-company-id="${escapeHtml(account.id)}">Remove</button></span></div>`;
         }).join("") || `<div class="ncc-notice">No saved Director-key company profile yet. Add one below, or refresh with TornPDA’s injected key.</div>`;
-        const accountsSection = section("Company Director keys", `${accountRows}<div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="open-company-account">Add company…</button><button class="ncc-button" data-action="refresh-all-companies">Sync saved companies now</button></div><p class="ncc-note">TornPDA automatically supplies its default or dedicated userscript key for your primary company. Add a Limited-access Director key only for another company, or when the injected key is missing or lacks Company Employees access. Desktop/Tampermonkey continues to use a manually entered key. Every manual key is validated against its own Company ID before it is saved and is never rendered, logged, or exported by default.</p>`);
+        const accountsSection = section("Company Director keys", `${primaryKeySummary}${accountRows}<div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="open-company-account">Add company…</button><button class="ncc-button" data-action="refresh-all-companies">Sync saved companies now</button></div><p class="ncc-note">TornPDA automatically supplies its default or dedicated userscript key for your primary company. Add a Limited-access Director key only for another company, or when the injected key is missing or lacks Company Employees access. Desktop/Tampermonkey continues to use a manually entered key. Every manual key is validated against its own Company ID before it is saved and is never rendered, logged, or exported by default.</p>`);
         const runtimeStorage = section("Runtime & storage", `<div class="ncc-kv"><span>Runtime</span><span>${escapeHtml(runtime)} · ${escapeHtml(state.runtimeKind)}</span></div><div class="ncc-kv"><span>Layout profile</span><span>${escapeHtml(state.layoutProfile)}</span></div><div class="ncc-kv"><span>Current screen size</span><span>${escapeHtml(screenSize)}</span></div><div class="ncc-kv"><span>Storage method</span><span>${escapeHtml(storageMethodLabel())}</span></div><label class="ncc-check" style="margin-top:10px"><input id="ncc-use-legacy-gm-storage" type="checkbox" ${settings.useLegacyGMStorage ? "checked" : ""}><span><b>Use legacy GM storage</b><br>Unchecked keeps TornPDA <code>PDA_storage</code> primary when available, with compatible GM/local fallback.</span></label>`);
         const alertModeOptions = [["off", "Off"], ["combined", "Combined all-company alert"], ["separate", "Separate alert for every company"], ["selected", "Selected company only"]].map(([value, label]) => `<option value="${value}" ${settings.dailyAlertMode === value ? "selected" : ""}>${label}</option>`).join("");
         const dailyAlertSettings = section("Daily Company alerts", `<label><span class="ncc-label">Alert scope at 18:10 UTC</span><select id="ncc-daily-alert-mode" class="ncc-select" style="width:100%;margin-top:6px">${alertModeOptions}</select></label><div class="ncc-grid ncc-grid-2" style="margin-top:10px"><label class="ncc-check"><input id="ncc-daily-tick-toasts" type="checkbox" ${settings.dailyTickToasts ? "checked" : ""}><span><b>Show daily-tick toasts</b><br>Daily Income, Daily Profit, Customer Count, Star Level, stock change, and employee-risk details remain fully visible.</span></label><label class="ncc-check"><input id="ncc-daily-tick-notifications" type="checkbox" ${settings.dailyTickNotifications ? "checked" : ""}><span><b>Show daily-tick notifications</b><br>TornPDA receives one native 18:10 reminder to open the Companion for its all-company sync.</span></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save daily alert choices</button></div>`);
@@ -4520,7 +4539,7 @@
         dailyAlertKindAt, dailyAlertKindsAt, nextDailyReminderTimestamp, buildDailyTickReminder,
         dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, responseBodyText, isCompanyPageUrl,
         createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument,
-        materializeCompanyBackupStores, utf8Base64, injectedTornApiKey, requiresDirectorKey
+        materializeCompanyBackupStores, utf8Base64, injectedTornApiKey, requiresDirectorKey, primaryDirectorKeyStatus
     };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();

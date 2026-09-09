@@ -25,6 +25,27 @@ test("TornPDA key failures distinguish access problems from transient API failur
     assert.match(source, /account\?\.source === "pda" && employeesResult\.status !== "fulfilled" && requiresDirectorKey/);
 });
 
+test("Settings identifies the primary Director key source independently of the active company", () => {
+    const settings = {
+        primaryCompanyId: "101",
+        activeCompanyId: "202",
+        companyAccounts: {
+            101: { id: "101", name: "Primary Co", key: "custom-key", source: "saved" },
+            202: { id: "202", name: "Secondary Co", key: "secondary-key", source: "saved" }
+        }
+    };
+    assert.deepEqual(companion.primaryDirectorKeyStatus(settings, ""), {
+        id: "101", name: "Primary Co", source: "custom", label: "Custom saved Director key", available: true
+    });
+    settings.companyAccounts[101] = { id: "101", name: "Primary Co", source: "pda" };
+    assert.deepEqual(companion.primaryDirectorKeyStatus(settings, "injected-key"), {
+        id: "101", name: "Primary Co", source: "pda", label: "TornPDA injected key", available: true
+    });
+    assert.match(source, /Primary Director key in use/);
+    assert.match(source, /Key value remains hidden/);
+    assert.match(source, /const companyRole = account\.id === primaryKey\.id \? "Primary" : "Secondary"/);
+});
+
 test("startup response parsing prefers populated TornPDA payload fields and retries transient invalid JSON", () => {
     assert.equal(companion.responseBodyText({ status: 200, responseText: "", response: { company: { id: 101 } } }), '{"company":{"id":101}}');
     assert.equal(companion.responseBodyText({ status: 200, responseText: "  ", body: { ok: true } }), '{"ok":true}');
