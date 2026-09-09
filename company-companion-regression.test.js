@@ -9,6 +9,22 @@ test("userscript version remains safe in the Node regression runtime", () => {
     assert.match(source, /const VERSION = typeof GM_info !== "undefined"/);
 });
 
+test("TornPDA injects its primary-company key exactly once while desktop keeps manual entry", () => {
+    assert.equal((source.match(/###PDA-APIKEY###/g) || []).length, 1, "the TornPDA replacement token must occur only once in executable source");
+    assert.match(source, /const PDA_INJECTED_TORN_KEY = "###PDA-APIKEY###";/);
+    assert.equal(companion.injectedTornApiKey(), "", "an unresolved token must not be treated as a desktop API key");
+    assert.match(source, /return account \? accountKey\(account\) : activeId \? "" : injectedTornApiKey\(\);/);
+    assert.match(source, /Desktop\/Tampermonkey continues to use a manually entered key/);
+});
+
+test("TornPDA key failures distinguish access problems from transient API failures", () => {
+    assert.equal(companion.requiresDirectorKey({ apiCode: 16 }), true);
+    assert.equal(companion.requiresDirectorKey({ apiCode: 2 }), true);
+    assert.equal(companion.requiresDirectorKey(new Error("Network request failed.")), false);
+    assert.match(source, /TornPDA’s API key does not have the required Company Employees access/);
+    assert.match(source, /account\?\.source === "pda" && employeesResult\.status !== "fulfilled" && requiresDirectorKey/);
+});
+
 test("startup response parsing prefers populated TornPDA payload fields and retries transient invalid JSON", () => {
     assert.equal(companion.responseBodyText({ status: 200, responseText: "", response: { company: { id: 101 } } }), '{"company":{"id":101}}');
     assert.equal(companion.responseBodyText({ status: 200, responseText: "  ", body: { ok: true } }), '{"ok":true}');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion Beta
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.42-beta.3
+// @version      1.3.42-beta.4
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -26,11 +26,13 @@
 (() => {
     "use strict";
 
-    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.3";
+    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.4";
 
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
-    const PDA_INJECTED_TORN_KEY = "_###PDA-APIKEY###_";
+    // TornPDA replaces this exact token at runtime. Keep it as the token's only
+    // occurrence in executable source so the unresolved-key check is not replaced too.
+    const PDA_INJECTED_TORN_KEY = "###PDA-APIKEY###";
     const DAY = 86400000;
     const DAILY_TICK_HOUR_UTC = 18;
     const DAILY_SYNC_MINUTE_UTC = 10;
@@ -260,7 +262,7 @@
     };
     const injectedTornApiKey = () => {
         const key = String(PDA_INJECTED_TORN_KEY || "").trim();
-        return key.includes("###PDA-APIKEY###") ? "" : key;
+        return key.startsWith("###") && key.endsWith("###") ? "" : key;
     };
     const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
     const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
@@ -374,7 +376,13 @@
         || "";
     const accountForCompany = (companyId = activeCompanyId()) => companyAccountMap(state.settings)[normalizeCompanyId(companyId)] || null;
     const accountKey = (account) => account?.source === "pda" ? injectedTornApiKey() : String(account?.key || "").trim();
-    const activeTornApiKey = () => accountKey(accountForCompany()) || injectedTornApiKey();
+    const activeTornApiKey = () => {
+        const activeId = activeCompanyId();
+        const account = accountForCompany(activeId);
+        // The injected key belongs only to TornPDA's primary company. A saved
+        // secondary profile must never silently fall back to that different key.
+        return account ? accountKey(account) : activeId ? "" : injectedTornApiKey();
+    };
     const hasTornApiKey = () => Boolean(activeTornApiKey());
     const selectableCompanyOptions = (accounts, activeId = "", transientProfile = null) => {
         const normalized = Object.values(accounts || {}).map((account) => normalizeAccount(account)).filter(Boolean);
@@ -1328,6 +1336,24 @@
         return `${source}: ${error.error || error.message || error.code || "request failed"}`;
     }
 
+    function apiErrorCode(payload) {
+        const error = payload?.error || payload?.errors;
+        const code = typeof error === "object" && error !== null ? Number(error.code) : NaN;
+        return Number.isFinite(code) ? code : null;
+    }
+
+    function requiresDirectorKey(error) {
+        const code = Number(error?.apiCode);
+        if ([1, 2, 10, 13, 16, 18].includes(code)) return true;
+        return /incorrect key|key is empty|access level.+not high enough|permission.+access|key.+(?:paused|disabled)/i.test(String(error?.message || error || ""));
+    }
+
+    function tornPdaKeyFailureMessage(error) {
+        return Number(error?.apiCode) === 16 || /access level|permission/i.test(String(error?.message || ""))
+            ? "TornPDA’s API key does not have the required Company Employees access. Add a Limited-access Director key in Settings."
+            : "TornPDA’s API key is unavailable or invalid. Add a Limited-access Director key in Settings.";
+    }
+
     function responseBodyText(response) {
         if (typeof response === "string") return response;
         const candidates = [response?.responseText, response?.response, response?.body];
@@ -1443,6 +1469,7 @@
         const error = apiError(payload, source);
         if (error) {
             const failure = new Error(error);
+            failure.apiCode = apiErrorCode(payload);
             errorLog("api:payload failure", { ...safeRequestDescriptor(options?.url, options?.method), source, reason: safeDiagnosticError(failure) });
             throw failure;
         }
@@ -2350,11 +2377,25 @@
             tornWithKey(key, "/company/news", { cat: "funds", limit: 100, sort: "DESC" }),
             tornWithKey(key, "/company/applications")
         ]);
-        if (profileResult.status !== "fulfilled") throw new Error(profileResult.reason?.message || "Unable to load company profile.");
+        if (profileResult.status !== "fulfilled") {
+            if (account?.source === "pda" && requiresDirectorKey(profileResult.reason)) {
+                const failure = new Error(tornPdaKeyFailureMessage(profileResult.reason));
+                failure.requiresDirectorKey = true;
+                failure.apiCode = profileResult.reason?.apiCode ?? null;
+                throw failure;
+            }
+            throw new Error(profileResult.reason?.message || "Unable to load company profile.");
+        }
         const profile = unwrap(profileResult.value, "profile", {});
         const id = normalizeCompanyId(profile?.id);
         if (!id) throw new Error("Torn did not return a company profile for this Director key.");
         if (account?.id && normalizeCompanyId(account.id) !== id) throw new Error("This Director key resolves to a different company and was not saved.");
+        if (account?.source === "pda" && employeesResult.status !== "fulfilled" && requiresDirectorKey(employeesResult.reason)) {
+            const failure = new Error(tornPdaKeyFailureMessage(employeesResult.reason));
+            failure.requiresDirectorKey = true;
+            failure.apiCode = employeesResult.reason?.apiCode ?? null;
+            throw failure;
+        }
         const resultValue = (result, property, fallback) => result.status === "fulfilled" ? unwrap(result.value, property, fallback) : fallback;
         const now = Date.now();
         const messages = [];
@@ -3705,7 +3746,7 @@
             const keyState = account.source === "pda" ? "TornPDA injected" : accountKey(account) ? "Director key saved" : "Director key missing — add again";
             return `<div class="ncc-kv"><span><b>${escapeHtml(account.name)}</b><br><small>${escapeHtml(account.typeName || "Company")} · ID ${formatNumber(account.id)}</small></span><span>${account.id === activeCompanyId() ? "Current · " : ""}${keyState}<br><button class="ncc-button" data-action="select-company" data-company-id="${escapeHtml(account.id)}">Open</button> <button class="ncc-button ncc-danger" data-action="remove-company" data-company-id="${escapeHtml(account.id)}">Remove</button></span></div>`;
         }).join("") || `<div class="ncc-notice">No saved Director-key company profile yet. Add one below, or refresh with TornPDA’s injected key.</div>`;
-        const accountsSection = section("Company Director keys", `${accountRows}<div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="open-company-account">Add company…</button><button class="ncc-button" data-action="refresh-all-companies">Sync saved companies now</button></div><p class="ncc-note">Each Limited-access Director key is validated against its own Company ID before it is saved. Saved keys are never rendered, logged, exported by default, or stored in TornPDA injected-key form.</p>`);
+        const accountsSection = section("Company Director keys", `${accountRows}<div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="open-company-account">Add company…</button><button class="ncc-button" data-action="refresh-all-companies">Sync saved companies now</button></div><p class="ncc-note">TornPDA automatically supplies its default or dedicated userscript key for your primary company. Add a Limited-access Director key only for another company, or when the injected key is missing or lacks Company Employees access. Desktop/Tampermonkey continues to use a manually entered key. Every manual key is validated against its own Company ID before it is saved and is never rendered, logged, or exported by default.</p>`);
         const runtimeStorage = section("Runtime & storage", `<div class="ncc-kv"><span>Runtime</span><span>${escapeHtml(runtime)} · ${escapeHtml(state.runtimeKind)}</span></div><div class="ncc-kv"><span>Layout profile</span><span>${escapeHtml(state.layoutProfile)}</span></div><div class="ncc-kv"><span>Current screen size</span><span>${escapeHtml(screenSize)}</span></div><div class="ncc-kv"><span>Storage method</span><span>${escapeHtml(storageMethodLabel())}</span></div><label class="ncc-check" style="margin-top:10px"><input id="ncc-use-legacy-gm-storage" type="checkbox" ${settings.useLegacyGMStorage ? "checked" : ""}><span><b>Use legacy GM storage</b><br>Unchecked keeps TornPDA <code>PDA_storage</code> primary when available, with compatible GM/local fallback.</span></label>`);
         const alertModeOptions = [["off", "Off"], ["combined", "Combined all-company alert"], ["separate", "Separate alert for every company"], ["selected", "Selected company only"]].map(([value, label]) => `<option value="${value}" ${settings.dailyAlertMode === value ? "selected" : ""}>${label}</option>`).join("");
         const dailyAlertSettings = section("Daily Company alerts", `<label><span class="ncc-label">Alert scope at 18:10 UTC</span><select id="ncc-daily-alert-mode" class="ncc-select" style="width:100%;margin-top:6px">${alertModeOptions}</select></label><div class="ncc-grid ncc-grid-2" style="margin-top:10px"><label class="ncc-check"><input id="ncc-daily-tick-toasts" type="checkbox" ${settings.dailyTickToasts ? "checked" : ""}><span><b>Show daily-tick toasts</b><br>Daily Income, Daily Profit, Customer Count, Star Level, stock change, and employee-risk details remain fully visible.</span></label><label class="ncc-check"><input id="ncc-daily-tick-notifications" type="checkbox" ${settings.dailyTickNotifications ? "checked" : ""}><span><b>Show daily-tick notifications</b><br>TornPDA receives one native 18:10 reminder to open the Companion for its all-company sync.</span></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save daily alert choices</button></div>`);
@@ -4479,7 +4520,7 @@
         dailyAlertKindAt, dailyAlertKindsAt, nextDailyReminderTimestamp, buildDailyTickReminder,
         dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, responseBodyText, isCompanyPageUrl,
         createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument,
-        materializeCompanyBackupStores, utf8Base64
+        materializeCompanyBackupStores, utf8Base64, injectedTornApiKey, requiresDirectorKey
     };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
