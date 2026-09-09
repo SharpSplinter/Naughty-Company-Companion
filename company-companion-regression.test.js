@@ -17,6 +17,28 @@ test("TornPDA injects its primary-company key exactly once while desktop keeps m
     assert.match(source, /Desktop\/Tampermonkey continues to use a manually entered key/);
 });
 
+test("startup binds an unassigned TornPDA key to its primary company without replacing the selected secondary", () => {
+    const secondaryOnly = {
+        activeCompanyId: "202",
+        companyAccounts: {
+            202: { id: "202", name: "Secondary Co", key: "secondary-key", source: "saved" }
+        }
+    };
+    assert.equal(companion.needsInjectedPrimaryDiscovery(secondaryOnly, "injected-key"), true);
+    assert.equal(companion.needsInjectedPrimaryDiscovery(secondaryOnly, ""), false);
+    assert.equal(companion.needsInjectedPrimaryDiscovery({
+        ...secondaryOnly,
+        companyAccounts: {
+            ...secondaryOnly.companyAccounts,
+            101: { id: "101", name: "Primary Co", source: "pda" }
+        }
+    }, "injected-key"), false);
+    assert.match(source, /await ensureInjectedPrimaryAccount\(\)/);
+    assert.match(source, /const selectedId = activeCompanyId\(\)/);
+    assert.match(source, /activeCompanyId: selectedId/);
+    assert.match(source, /primary-key:injected account bound/);
+});
+
 test("TornPDA key failures distinguish access problems from transient API failures", () => {
     assert.equal(companion.requiresDirectorKey({ apiCode: 16 }), true);
     assert.equal(companion.requiresDirectorKey({ apiCode: 2 }), true);

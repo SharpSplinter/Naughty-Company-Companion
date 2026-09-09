@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion Beta
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.42-beta.10
+// @version      1.3.42-beta.11
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -26,7 +26,7 @@
 (() => {
     "use strict";
 
-    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.10";
+    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.11";
 
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
@@ -406,6 +406,8 @@
         || "";
     const accountForCompany = (companyId = activeCompanyId()) => companyAccountMap(state.settings)[normalizeCompanyId(companyId)] || null;
     const accountKey = (account) => account?.source === "pda" ? injectedTornApiKey() : String(account?.key || "").trim();
+    const needsInjectedPrimaryDiscovery = (settings = state.settings, injectedKey = injectedTornApiKey()) => Boolean(injectedKey)
+        && !Object.values(companyAccountMap(settings)).some((account) => account.source === "pda");
     const primaryDirectorKeyStatus = (settings = state.settings, injectedKey = injectedTornApiKey()) => {
         const accounts = companyAccountMap(settings);
         const injectedAccount = Object.values(accounts).find((account) => account.source === "pda") || null;
@@ -2527,6 +2529,23 @@
         return snapshot.data;
     }
 
+    async function ensureInjectedPrimaryAccount({ persist = true } = {}) {
+        const accounts = companyAccountMap(state.settings);
+        const existing = Object.values(accounts).find((account) => account.source === "pda") || null;
+        if (existing || !needsInjectedPrimaryDiscovery(state.settings)) return existing;
+        const selectedId = activeCompanyId();
+        const snapshot = await fetchCompanySnapshot({ id: "", key: "", source: "pda" });
+        await commitCompanySnapshot(snapshot, { persist: false });
+        if (selectedId && selectedId !== snapshot.id) {
+            state.settings = deepMergeSettings({ ...state.settings, activeCompanyId: selectedId });
+            if (state.cacheByCompany[selectedId]) activateCompanySnapshot(selectedId);
+            else { state.data = null; state.cache = null; }
+        }
+        if (persist) await storeSetMany({ [STORE.settings]: state.settings, [STORE.cache]: cacheEnvelope(), [STORE.history]: state.history }, { immediate: true });
+        debugLog("primary-key:injected account bound", { companyId: snapshot.id });
+        return snapshot.account;
+    }
+
     async function refreshCore({ silent = false, suppressDailyAlerts = false, scheduled = false, accountId = activeCompanyId(), background = false, persist = true } = {}) {
         if (scheduled && documentIsHidden()) {
             debugLog("refresh:paused", { source: "scheduled core refresh", reason: "document hidden" });
@@ -4598,6 +4617,17 @@
         startPageLifecycleMonitor();
         if (!lifecycleRuntime.active) return;
         mountShell();
+        let primaryDiscoveryError = null;
+        if (needsInjectedPrimaryDiscovery()) {
+            state.status = "Identifying the primary company for TornPDA’s injected key…";
+            render();
+            try {
+                await ensureInjectedPrimaryAccount();
+            } catch (error) {
+                primaryDiscoveryError = error?.message || "Unable to identify the primary company for TornPDA’s injected key.";
+                warningLog("primary-key:injected discovery failed", { reason: safeDiagnosticError(error) });
+            }
+        }
         const activeAccount = accountForCompany();
         debugLog("startup:ready", {
             version: VERSION,
@@ -4607,7 +4637,10 @@
             tornKeyConfigured: hasTornApiKey(),
             tornKeySource: activeAccount?.source === "pda" ? "TornPDA injected" : accountKey(activeAccount) ? "saved Director profile" : injectedTornApiKey() ? "TornPDA injected" : "none"
         });
-        if (state.data?.fetchedAt) state.status = `Showing cached data from ${timeAgo(state.data.fetchedAt)}.`;
+        if (primaryDiscoveryError) {
+            state.error = primaryDiscoveryError;
+            state.status = "TornPDA’s injected primary key could not be identified.";
+        } else if (state.data?.fetchedAt) state.status = `Showing cached data from ${timeAgo(state.data.fetchedAt)}.`;
         else state.status = hasTornApiKey() ? "Ready to refresh company data." : "Add a Limited-access Director key to begin.";
         resetAutoRefresh();
         resetDailyTickAlerts();
@@ -4657,7 +4690,7 @@
         dailyAlertKindAt, dailyAlertKindsAt, nextDailyReminderTimestamp, buildDailyTickReminder,
         dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, responseBodyText, isCompanyPageUrl,
         createStorageAdapter, reconcilePersistedSettings, createCompanyBackupDocument, validateCompanyBackupDocument,
-        materializeCompanyBackupStores, utf8Base64, injectedTornApiKey, requiresDirectorKey, primaryDirectorKeyStatus
+        materializeCompanyBackupStores, utf8Base64, injectedTornApiKey, requiresDirectorKey, primaryDirectorKeyStatus, needsInjectedPrimaryDiscovery
     };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
