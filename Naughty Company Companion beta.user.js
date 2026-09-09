@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion Beta
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.42-beta.5
+// @version      1.3.42-beta.6
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -26,7 +26,7 @@
 (() => {
     "use strict";
 
-    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.5";
+    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.6";
 
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
@@ -3769,7 +3769,7 @@
         const runtimeStorage = section("Runtime & storage", `<div class="ncc-kv"><span>Runtime</span><span>${escapeHtml(runtime)} · ${escapeHtml(state.runtimeKind)}</span></div><div class="ncc-kv"><span>Layout profile</span><span>${escapeHtml(state.layoutProfile)}</span></div><div class="ncc-kv"><span>Current screen size</span><span>${escapeHtml(screenSize)}</span></div><div class="ncc-kv"><span>Storage method</span><span>${escapeHtml(storageMethodLabel())}</span></div><label class="ncc-check" style="margin-top:10px"><input id="ncc-use-legacy-gm-storage" type="checkbox" ${settings.useLegacyGMStorage ? "checked" : ""}><span><b>Use legacy GM storage</b><br>Unchecked keeps TornPDA <code>PDA_storage</code> primary when available, with compatible GM/local fallback.</span></label>`);
         const alertModeOptions = [["off", "Off"], ["combined", "Combined all-company alert"], ["separate", "Separate alert for every company"], ["selected", "Selected company only"]].map(([value, label]) => `<option value="${value}" ${settings.dailyAlertMode === value ? "selected" : ""}>${label}</option>`).join("");
         const dailyAlertSettings = section("Daily Company alerts", `<label><span class="ncc-label">Alert scope at 18:10 UTC</span><select id="ncc-daily-alert-mode" class="ncc-select" style="width:100%;margin-top:6px">${alertModeOptions}</select></label><div class="ncc-grid ncc-grid-2" style="margin-top:10px"><label class="ncc-check"><input id="ncc-daily-tick-toasts" type="checkbox" ${settings.dailyTickToasts ? "checked" : ""}><span><b>Show daily-tick toasts</b><br>Daily Income, Daily Profit, Customer Count, Star Level, stock change, and employee-risk details remain fully visible.</span></label><label class="ncc-check"><input id="ncc-daily-tick-notifications" type="checkbox" ${settings.dailyTickNotifications ? "checked" : ""}><span><b>Show daily-tick notifications</b><br>TornPDA receives one native 18:10 reminder to open the Companion for its all-company sync.</span></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save daily alert choices</button></div>`);
-        const backupRestore = section("Backup & restore", `<label class="ncc-check"><input id="ncc-backup-include-keys" type="checkbox"><span><b>Include saved Director keys in this backup</b><br>Unchecked by default. Keys are never displayed, logged, or included unless selected for this single download.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="download-company-backup">Download local Company backup</button><button class="ncc-button" data-action="choose-company-backup">Choose backup JSON to restore</button><input id="ncc-company-backup-file" type="file" accept="application/json,.json" style="display:none"></div><p class="ncc-note">Backups include separate company snapshots, history, rankings, planner data, layout, settings, daily-sync state, and alerts. API keys stay out unless you opt in both when creating and restoring a key-containing backup.</p>`);
+        const backupRestore = section("Backup & restore", `<label class="ncc-check"><input id="ncc-backup-include-keys" type="checkbox"><span><b>Include saved Director keys in this backup</b><br>Unchecked by default. Keys are never displayed, logged, or included unless selected for this single download.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-company-backup">Save backup file</button><button class="ncc-button" data-action="share-company-backup">Share backup…</button><button class="ncc-button" data-action="choose-company-backup">Restore from device or Drive…</button><input id="ncc-company-backup-file" type="file" accept=".json,application/json,text/json,text/plain" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none"></div><p class="ncc-note">Save uses the platform file picker when available, then TornPDA’s normal WebView download path (Android Downloads or the iOS app Documents folder). If TornPDA still opens Share, change <b>Settings → Browser → Downloads → Download action</b> to <b>Save</b>. Share opens TornPDA’s system share sheet. Restore opens the Android/iOS document picker, where local storage, Google Drive, iCloud Drive, and other installed document providers can be selected. Backups include separate company snapshots, history, rankings, planner data, layout, settings, daily-sync state, and alerts. API keys stay out unless you opt in both when creating and restoring a key-containing backup.</p>`);
         return `${dataNotice()}${accountsSection}${section("Local calculation & refresh", `<div class="ncc-grid ncc-grid-2"><label class="ncc-check"><input id="ncc-stock-cost" type="checkbox" ${settings.includeStockCost ? "checked" : ""}><span><b>Include sold stock cost in daily Profit.</b><br>Daily Profit subtracts sold stock cost, ads, and wages when all required data is available.</span></label><label><span class="ncc-label">Automatic foreground refresh</span><div class="ncc-inline" style="margin-top:6px"><input id="ncc-refresh-minutes" class="ncc-input" type="number" min="2" max="120" value="${clamp(asNumber(settings.autoRefreshMinutes, 10), 2, 120)}" style="width:85px"><span class="ncc-help">minutes while the page is active</span></div></label></div><p class="ncc-note">Role projections use the bundled local calculator. Employee work stats never leave Torn for an efficiency lookup.</p><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save preferences only</button><button class="ncc-button" data-action="reset-layout">Reset panel position</button></div>`)}${dailyAlertSettings}${runtimeStorage}${backupRestore}${section("Local data", `<div class="ncc-inline"><button class="ncc-button" data-action="export-history" ${companyHistory().length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="clear-local-data">Clear companion data</button></div><p class="ncc-note">Clearing Companion data deletes local company snapshots, rankings, plans, history, daily-sync records, and saved Director keys. It cannot change Torn data.</p>`)}<p class="ncc-note">Naughty Company Companion ${VERSION} · TornPDA/Tampermonkey compatible.</p>`;
     }
 
@@ -4023,7 +4023,29 @@
         document.body.append(anchor);
         anchor.click();
         anchor.remove();
-        URL.revokeObjectURL(url);
+        // TornPDA resolves blob downloads asynchronously in its native WebView
+        // callback, so keep the object URL alive long enough for that fetch.
+        window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+
+    async function saveTextFileToLocalFilesystem(text, fileName, type) {
+        if (typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: fileName,
+                    types: [{ description: "Naughty Company backup", accept: { "application/json": [".json"] } }]
+                });
+                const writable = await handle.createWritable();
+                await writable.write(new Blob([text], { type }));
+                await writable.close();
+                return { transport: "picker" };
+            } catch (error) {
+                if (error?.name === "AbortError") return { transport: "cancelled" };
+                warningLog("export:save picker fallback", { reason: safeDiagnosticError(error) });
+            }
+        }
+        downloadLocalTextFile(text, fileName, type);
+        return { transport: "download" };
     }
 
     function utf8Base64(text) {
@@ -4067,15 +4089,28 @@
         return (await shareTextWithTornPDA(csv, fileName)).shared;
     }
 
-    async function downloadCompanyBackup() {
+    async function exportCompanyBackup(destination = "save") {
         if (state.exportInFlight) return false;
         const includeKeys = document.getElementById("ncc-backup-include-keys")?.checked === true;
         state.exportInFlight = true;
         render();
         try {
             const backup = createCompanyBackupDocument(currentCompanyBackupStores(), { includeApiKeys: includeKeys });
-            const result = await exportTextFile(JSON.stringify(backup, null, 2), backupFileName(), "application/json;charset=utf-8");
-            if (result.transport === "failed") {
+            const text = JSON.stringify(backup, null, 2);
+            const fileName = backupFileName();
+            const result = destination === "share"
+                ? await shareTextWithTornPDA(text, fileName)
+                : await saveTextFileToLocalFilesystem(text, fileName, "application/json;charset=utf-8");
+            if (destination === "share" && !result.native) {
+                downloadLocalTextFile(text, fileName, "application/json;charset=utf-8");
+                result.transport = "download";
+            }
+            if (result.transport === "cancelled") {
+                state.status = "Company backup save cancelled.";
+                render();
+                return false;
+            }
+            if (destination === "share" && result.native && !result.shared) {
                 state.error = result.message || "TornPDA could not open the native share sheet. No backup was exported.";
                 state.status = "Company backup was not exported.";
                 render();
@@ -4083,7 +4118,12 @@
                 return false;
             }
             const detail = includeKeys ? "with opted-in API keys." : "without API keys.";
-            state.status = result.transport === "share" ? "Company backup opened in the TornPDA share sheet " + detail : "Local Company backup downloaded " + detail;
+            state.error = "";
+            state.status = destination === "share" && result.shared
+                ? "Company backup opened in the TornPDA share sheet " + detail
+                : result.transport === "picker"
+                    ? "Company backup saved to the selected file location " + detail
+                    : "Company backup sent to TornPDA’s local download path " + detail;
             render();
             void showFeedbackToast(state.status, "good", 6);
             return true;
@@ -4091,6 +4131,21 @@
             state.exportInFlight = false;
             render();
         }
+    }
+
+    const saveCompanyBackup = () => exportCompanyBackup("save");
+    const shareCompanyBackup = () => exportCompanyBackup("share");
+
+    function openCompanyBackupPicker() {
+        const input = document.getElementById("ncc-company-backup-file");
+        if (!input) return false;
+        try {
+            if (typeof input.showPicker === "function") input.showPicker();
+            else input.click();
+        } catch {
+            input.click();
+        }
+        return true;
     }
 
     function readBackupFileText(file) {
@@ -4330,8 +4385,9 @@
                     case "auto-assign": await autoAssign(); break;
                     case "save-settings": await saveSettingsFromForm(); break;
                     case "verify-refresh": await saveSettingsFromForm(); await refreshCore(); break;
-                    case "download-company-backup": await downloadCompanyBackup(); break;
-                    case "choose-company-backup": document.getElementById("ncc-company-backup-file")?.click(); break;
+                    case "save-company-backup": await saveCompanyBackup(); break;
+                    case "share-company-backup": await shareCompanyBackup(); break;
+                    case "choose-company-backup": openCompanyBackupPicker(); break;
                     case "confirm-backup-restore": await confirmCompanyBackupRestore(); break;
                     case "export-history": await exportHistory(); break;
                     case "reset-history": await resetHistory(); break;

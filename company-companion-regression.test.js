@@ -832,18 +832,27 @@ test("Company backup v2 isolates company keys and migrates legacy single-company
     assert.deepEqual(unboundLegacy.settings.companyAccounts, {});
     assert.doesNotMatch(source.match(/const activeTornApiKey[\s\S]*?;/)?.[0] || "", /state\.settings\.tornKey/);
     assert.throws(() => companion.validateCompanyBackupDocument({ ...backup, namespace: "other-companion" }), /wrong script namespace/);
-    assert.match(source, /data-action="download-company-backup"/);
+    assert.match(source, /data-action="save-company-backup"/);
+    assert.match(source, /data-action="share-company-backup"/);
+    assert.match(source, /data-action="choose-company-backup"/);
     assert.match(source, /case "confirm-backup-restore"/);
 });
 
-test("Company backup and CSV exports use the TornPDA share sheet with a local-download fallback", () => {
+test("Company backups support local save, native share, and device or cloud-provider restore", () => {
     assert.equal(companion.utf8Base64("Income,Profit\n1,2"), "SW5jb21lLFByb2ZpdAoxLDI=");
     assert.match(source, /async function shareTextWithTornPDA\(text, fileName\)/);
     assert.match(source, /bridge\.callHandler\("shareFile", \{ base64Data, fileName \}\)/);
     assert.match(source, /response\?\.status === "success"/);
-    assert.match(source, /async function exportTextFile\(text, fileName, type\)/);
+    assert.match(source, /async function saveTextFileToLocalFilesystem\(text, fileName, type\)/);
+    assert.match(source, /window\.showSaveFilePicker/);
+    assert.match(source, /window\.setTimeout\(\(\) => URL\.revokeObjectURL\(url\), 60000\)/);
+    assert.match(source, /const saveCompanyBackup = \(\) => exportCompanyBackup\("save"\)/);
+    assert.match(source, /const shareCompanyBackup = \(\) => exportCompanyBackup\("share"\)/);
+    assert.match(source, /accept="\.json,application\/json,text\/json,text\/plain"/);
+    assert.match(source, /function openCompanyBackupPicker\(\)/);
+    assert.match(source, /typeof input\.showPicker === "function"/);
+    assert.match(source, /Restore from device or Drive/);
     assert.match(source, /exportInFlight: false/);
-    assert.match(source, /const result = await exportTextFile\(JSON\.stringify\(backup, null, 2\), backupFileName\(\), "application\/json;charset=utf-8"\)/);
     assert.match(source, /Company backup opened in the TornPDA share sheet/);
     assert.match(source, /History CSV opened in the TornPDA share sheet/);
 });
