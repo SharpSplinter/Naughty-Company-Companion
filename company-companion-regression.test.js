@@ -41,9 +41,43 @@ test("Settings identifies the primary Director key source independently of the a
     assert.deepEqual(companion.primaryDirectorKeyStatus(settings, "injected-key"), {
         id: "101", name: "Primary Co", source: "pda", label: "TornPDA injected key", available: true
     });
-    assert.match(source, /Primary Director key in use/);
+    assert.match(source, /<b>Primary Director key<\/b>/);
     assert.match(source, /Key value remains hidden/);
-    assert.match(source, /const companyRole = account\.id === primaryKey\.id \? "Primary" : "Secondary"/);
+    assert.match(source, /filter\(\(account\) => account\.id !== primaryKey\.id\)/);
+    assert.match(source, /<span>Secondary\$\{account\.id === activeCompanyId\(\)/);
+});
+
+test("TornPDA settings reconciliation retains secondary keys without resurrecting later removals", () => {
+    const nativeBeforeRevision = {
+        primaryCompanyId: "101",
+        activeCompanyId: "101",
+        companyAccounts: {
+            101: { id: "101", name: "Primary Co", source: "pda" }
+        }
+    };
+    const legacyBeforeRevision = {
+        primaryCompanyId: "101",
+        activeCompanyId: "202",
+        companyAccounts: {
+            101: { id: "101", name: "Primary Co", key: "old-primary-key", source: "saved" },
+            202: { id: "202", name: "Secondary Co", key: "secondary-key", source: "saved" }
+        }
+    };
+    const reconciled = companion.reconcilePersistedSettings(nativeBeforeRevision, legacyBeforeRevision, 12345);
+    assert.deepEqual(Object.keys(reconciled.companyAccounts).sort(), ["101", "202"]);
+    assert.equal(reconciled.companyAccounts[101].source, "pda");
+    assert.equal(reconciled.companyAccounts[101].key, "");
+    assert.equal(reconciled.companyAccounts[202].key, "secondary-key");
+    assert.equal(reconciled.persistenceRevision, 12345);
+
+    const newerRemoval = companion.reconcilePersistedSettings(
+        { ...nativeBeforeRevision, persistenceRevision: 200 },
+        { ...legacyBeforeRevision, persistenceRevision: 100 },
+        300
+    );
+    assert.deepEqual(Object.keys(newerRemoval.companyAccounts), ["101"]);
+    assert.equal(newerRemoval.persistenceRevision, 200);
+    assert.match(source, /await legacySet\(STORE\.settings, next\[STORE\.settings\]\)/);
 });
 
 test("startup response parsing prefers populated TornPDA payload fields and retries transient invalid JSON", () => {

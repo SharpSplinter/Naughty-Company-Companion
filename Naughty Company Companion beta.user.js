@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion Beta
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.42-beta.9
+// @version      1.3.42-beta.10
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -26,7 +26,7 @@
 (() => {
     "use strict";
 
-    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.9";
+    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42-beta.10";
 
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
@@ -85,6 +85,7 @@
         companyAccounts: {},
         activeCompanyId: "",
         primaryCompanyId: "",
+        persistenceRevision: 0,
         dailyAlertMode: "off",
         sourceTimes: {},
         includeStockCost: true,
@@ -370,6 +371,34 @@
         }
         return accounts;
     };
+    const persistenceRevision = (settings) => Math.max(0, Math.trunc(asNumber(settings?.persistenceRevision)));
+    const reconcilePersistedSettings = (preferredRaw, fallbackRaw, timestamp = Date.now()) => {
+        const preferred = isObject(preferredRaw) ? preferredRaw : null;
+        const fallback = isObject(fallbackRaw) ? fallbackRaw : null;
+        if (!preferred && !fallback) return null;
+        const preferredRevision = persistenceRevision(preferred);
+        const fallbackRevision = persistenceRevision(fallback);
+        if (preferredRevision || fallbackRevision) {
+            return deepMergeSettings(fallbackRevision > preferredRevision ? fallback : preferred || fallback);
+        }
+        const preferredAccounts = companyAccountMap(preferred || {});
+        const fallbackAccounts = companyAccountMap(fallback || {});
+        const companyAccounts = { ...fallbackAccounts };
+        Object.entries(preferredAccounts).forEach(([id, account]) => {
+            const older = fallbackAccounts[id];
+            companyAccounts[id] = normalizeAccount({
+                ...older,
+                ...account,
+                key: account.source === "saved" && !account.key && older?.source === "saved" ? older.key : account.key
+            }, id);
+        });
+        return deepMergeSettings({
+            ...(fallback || {}),
+            ...(preferred || {}),
+            companyAccounts,
+            persistenceRevision: Math.max(1, Math.trunc(asNumber(timestamp)))
+        });
+    };
     const activeCompanyId = () => normalizeCompanyId(state.settings.activeCompanyId)
         || normalizeCompanyId(state.data?.profile?.id)
         || Object.keys(state.cacheByCompany)[0]
@@ -430,6 +459,7 @@
             companyAccounts,
             activeCompanyId: normalizeCompanyId(source.activeCompanyId),
             primaryCompanyId: injectedPrimary || normalizeCompanyId(source.primaryCompanyId) || normalizeCompanyId(source.activeCompanyId) || Object.keys(companyAccounts)[0] || "",
+            persistenceRevision: persistenceRevision(source),
             dailyAlertMode: ["off", "combined", "separate", "selected"].includes(source.dailyAlertMode) ? source.dailyAlertMode : "off",
             sourceTimes: isObject(source.sourceTimes) ? source.sourceTimes : {},
             assignments: isObject(source.assignments) ? source.assignments : {},
@@ -508,6 +538,7 @@
             if (hasOwn(settings, key) && typeof settings[key] !== "boolean") backupValidationError(`invalid ${key} setting`);
         });
         if (hasOwn(settings, "autoRefreshMinutes") && (!Number.isFinite(Number(settings.autoRefreshMinutes)) || Number(settings.autoRefreshMinutes) < 2 || Number(settings.autoRefreshMinutes) > 120)) backupValidationError("invalid automatic refresh setting");
+        if (hasOwn(settings, "persistenceRevision") && (!Number.isFinite(Number(settings.persistenceRevision)) || Number(settings.persistenceRevision) < 0)) backupValidationError("invalid persistence revision");
         if (hasOwn(settings, "activeTab") && typeof settings.activeTab !== "string") backupValidationError("invalid active-tab setting");
         ["assignments", "lockedEmployees", "positionCapacities", "positionPriority", "companyAccounts", "sourceTimes"].forEach((key) => {
             if (hasOwn(settings, key) && !isObject(settings[key])) backupValidationError(`invalid ${key} setting`);
@@ -818,6 +849,16 @@
         if (storage.mode === "pda" && storage.pda) {
             try {
                 await storage.pda.setMany(next);
+                if (hasOwn(next, STORE.settings)) {
+                    try {
+                        // Settings are small and contain the manually supplied secondary
+                        // keys. Keep a recovery mirror so a partial/changed native
+                        // namespace can be reconciled without touching cache or history.
+                        await legacySet(STORE.settings, next[STORE.settings]);
+                    } catch (error) {
+                        warningLog("storage:settings mirror failed", { reason: safeDiagnosticError(error) });
+                    }
+                }
                 Object.keys(next).forEach((key) => storage.fallbackKeys.delete(key));
                 await persistFallbackKeys();
                 if (!storage.fallbackKeys.size) state.storageWarning = "";
@@ -850,6 +891,15 @@
         const entries = Object.entries(values).filter(([key]) => STORE_KEYS.includes(key));
         if (!entries.length) return Promise.resolve();
         const next = Object.fromEntries(entries);
+        if (hasOwn(next, STORE.settings) && isObject(next[STORE.settings])) {
+            const stampedSettings = deepMergeSettings({
+                ...next[STORE.settings],
+                persistenceRevision: Math.max(Date.now(), persistenceRevision(next[STORE.settings]) + 1)
+            });
+            next[STORE.settings] = stampedSettings;
+            values[STORE.settings] = stampedSettings;
+            state.settings = stampedSettings;
+        }
         Object.assign(storage.cache, next);
         return storageWriter.setMany(next, { immediate });
     }
@@ -989,12 +1039,20 @@
                     }
                 }
             });
+            const reconciledSettings = reconcilePersistedSettings(pdaValues[STORE.settings], legacyValues[STORE.settings]);
+            if (reconciledSettings) {
+                storage.cache[STORE.settings] = reconciledSettings;
+                if (JSON.stringify(pdaValues[STORE.settings]) !== JSON.stringify(reconciledSettings)) {
+                    migrations[STORE.settings] = reconciledSettings;
+                }
+            }
             storage.pda = pda;
             storage.mode = "pda";
             storage.initialized = true;
             if (Object.keys(migrations).length) {
                 try {
                     await pda.setMany(migrations);
+                    if (hasOwn(migrations, STORE.settings)) await legacySet(STORE.settings, migrations[STORE.settings]);
                     Object.keys(migrations).forEach((key) => storage.fallbackKeys.delete(key));
                     await persistFallbackKeys();
                 } catch (error) {
@@ -3759,13 +3817,14 @@
         const runtime = nativeRuntime.isTornPDA ? "TornPDA (native confirmed)" : tornPdaUserAgent(currentUserAgent()) ? "TornPDA (native confirmation pending)" : "Desktop / Tampermonkey";
         const screenSize = `${formatNumber(viewport.width)} × ${formatNumber(viewport.height)} visible${panelRect ? ` · panel ${formatNumber(Math.round(panelRect.width))} × ${formatNumber(Math.round(panelRect.height))}` : ""}`;
         const primaryKey = primaryDirectorKeyStatus(settings);
-        const primaryKeySummary = `<div class="ncc-kv"><span><b>Primary Director key in use</b><br><small>${escapeHtml(primaryKey.name)}${primaryKey.id ? ` · ID ${formatNumber(primaryKey.id)}` : ""}</small></span><span class="${primaryKey.available ? "ncc-good" : "ncc-bad"}"><b>${escapeHtml(primaryKey.label)}</b><br><small>Key value remains hidden</small></span></div>`;
-        const accountRows = Object.values(accounts).sort((left, right) => left.name.localeCompare(right.name)).map((account) => {
+        const primaryAccount = primaryKey.id ? accounts[primaryKey.id] : null;
+        const primaryActions = primaryAccount ? `<br><button class="ncc-button" data-action="select-company" data-company-id="${escapeHtml(primaryAccount.id)}">Open</button>${primaryKey.source === "custom" ? ` <button class="ncc-button ncc-danger" data-action="remove-company" data-company-id="${escapeHtml(primaryAccount.id)}">Remove</button>` : ""}` : "";
+        const primaryKeySummary = `<div class="ncc-kv"><span><b>Primary Director key</b><br><small>${escapeHtml(primaryKey.name)}${primaryKey.id ? ` · ID ${formatNumber(primaryKey.id)}` : ""}</small></span><span class="${primaryKey.available ? "ncc-good" : "ncc-bad"}"><b>${escapeHtml(primaryKey.label)}</b><br><small>Key value remains hidden</small>${primaryActions}</span></div>`;
+        const accountRows = Object.values(accounts).filter((account) => account.id !== primaryKey.id).sort((left, right) => left.name.localeCompare(right.name)).map((account) => {
             const keyState = account.source === "pda" ? "TornPDA injected" : accountKey(account) ? "Director key saved" : "Director key missing — add again";
-            const companyRole = account.id === primaryKey.id ? "Primary" : "Secondary";
-            return `<div class="ncc-kv"><span><b>${escapeHtml(account.name)}</b><br><small>${escapeHtml(account.typeName || "Company")} · ID ${formatNumber(account.id)}</small></span><span>${companyRole}${account.id === activeCompanyId() ? " · Current" : ""} · ${keyState}<br><button class="ncc-button" data-action="select-company" data-company-id="${escapeHtml(account.id)}">Open</button> <button class="ncc-button ncc-danger" data-action="remove-company" data-company-id="${escapeHtml(account.id)}">Remove</button></span></div>`;
-        }).join("") || `<div class="ncc-notice">No saved Director-key company profile yet. Add one below, or refresh with TornPDA’s injected key.</div>`;
-        const accountsSection = section("Company Director keys", `${primaryKeySummary}${accountRows}<div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="open-company-account">Add company…</button><button class="ncc-button" data-action="refresh-all-companies">Sync saved companies now</button></div><p class="ncc-note">TornPDA automatically supplies its default or dedicated userscript key for your primary company. Add a Limited-access Director key only for another company, or when the injected key is missing or lacks Company Employees access. Desktop/Tampermonkey continues to use a manually entered key. Every manual key is validated against its own Company ID before it is saved and is never rendered, logged, or exported by default.</p>`);
+            return `<div class="ncc-kv"><span><b>${escapeHtml(account.name)}</b><br><small>${escapeHtml(account.typeName || "Company")} · ID ${formatNumber(account.id)}</small></span><span>Secondary${account.id === activeCompanyId() ? " · Current" : ""} · ${keyState}<br><button class="ncc-button" data-action="select-company" data-company-id="${escapeHtml(account.id)}">Open</button> <button class="ncc-button ncc-danger" data-action="remove-company" data-company-id="${escapeHtml(account.id)}">Remove</button></span></div>`;
+        }).join("") || `<div class="ncc-notice">No secondary Director key is saved.</div>`;
+        const accountsSection = section("Company Director keys", `${primaryKeySummary}<div class="ncc-label" style="margin-top:10px">Secondary company keys</div>${accountRows}<div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="open-company-account">Add company…</button><button class="ncc-button" data-action="refresh-all-companies">Sync saved companies now</button></div><p class="ncc-note">TornPDA automatically supplies its default or dedicated userscript key for your primary company. Add a Limited-access Director key only for another company, or when the injected key is missing or lacks Company Employees access. Desktop/Tampermonkey continues to use a manually entered key. Every manual key is validated against its own Company ID before it is saved and is never rendered, logged, or exported by default.</p>`);
         const runtimeStorage = section("Runtime & storage", `<div class="ncc-kv"><span>Runtime</span><span>${escapeHtml(runtime)} · ${escapeHtml(state.runtimeKind)}</span></div><div class="ncc-kv"><span>Layout profile</span><span>${escapeHtml(state.layoutProfile)}</span></div><div class="ncc-kv"><span>Current screen size</span><span>${escapeHtml(screenSize)}</span></div><div class="ncc-kv"><span>Storage method</span><span>${escapeHtml(storageMethodLabel())}</span></div><label class="ncc-check" style="margin-top:10px"><input id="ncc-use-legacy-gm-storage" type="checkbox" ${settings.useLegacyGMStorage ? "checked" : ""}><span><b>Use legacy GM storage</b><br>Unchecked keeps TornPDA <code>PDA_storage</code> primary when available, with compatible GM/local fallback.</span></label>`);
         const alertModeOptions = [["off", "Off"], ["combined", "Combined all-company alert"], ["separate", "Separate alert for every company"], ["selected", "Selected company only"]].map(([value, label]) => `<option value="${value}" ${settings.dailyAlertMode === value ? "selected" : ""}>${label}</option>`).join("");
         const dailyAlertSettings = section("Daily Company alerts", `<label><span class="ncc-label">Alert scope at 18:10 UTC</span><select id="ncc-daily-alert-mode" class="ncc-select" style="width:100%;margin-top:6px">${alertModeOptions}</select></label><div class="ncc-grid ncc-grid-2" style="margin-top:10px"><label class="ncc-check"><input id="ncc-daily-tick-toasts" type="checkbox" ${settings.dailyTickToasts ? "checked" : ""}><span><b>Show daily-tick toasts</b><br>Daily Income, Daily Profit, Customer Count, Star Level, stock change, and employee-risk details remain fully visible.</span></label><label class="ncc-check"><input id="ncc-daily-tick-notifications" type="checkbox" ${settings.dailyTickNotifications ? "checked" : ""}><span><b>Show daily-tick notifications</b><br>TornPDA receives one native 18:10 reminder to open the Companion for its all-company sync.</span></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save daily alert choices</button></div>`);
@@ -4597,7 +4656,7 @@
         employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp,
         dailyAlertKindAt, dailyAlertKindsAt, nextDailyReminderTimestamp, buildDailyTickReminder,
         dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, responseBodyText, isCompanyPageUrl,
-        createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument,
+        createStorageAdapter, reconcilePersistedSettings, createCompanyBackupDocument, validateCompanyBackupDocument,
         materializeCompanyBackupStores, utf8Base64, injectedTornApiKey, requiresDirectorKey, primaryDirectorKeyStatus
     };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
