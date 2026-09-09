@@ -833,12 +833,12 @@ test("Company backup v2 isolates company keys and migrates legacy single-company
     assert.doesNotMatch(source.match(/const activeTornApiKey[\s\S]*?;/)?.[0] || "", /state\.settings\.tornKey/);
     assert.throws(() => companion.validateCompanyBackupDocument({ ...backup, namespace: "other-companion" }), /wrong script namespace/);
     assert.match(source, /data-action="save-company-backup"/);
-    assert.match(source, /data-action="share-company-backup"/);
+    assert.doesNotMatch(source, /data-action="share-company-backup"/);
     assert.match(source, /data-action="choose-company-backup"/);
     assert.match(source, /case "confirm-backup-restore"/);
 });
 
-test("Company backups use reliable TornPDA downloads, desktop Save As, native share, and provider restore", () => {
+test("Company backups use TornPDA's documented shareFile handler, desktop Save As, and provider restore", () => {
     assert.equal(companion.utf8Base64("Income,Profit\n1,2"), "SW5jb21lLFByb2ZpdAoxLDI=");
     assert.match(source, /async function shareTextWithTornPDA\(text, fileName\)/);
     assert.match(source, /bridge\.callHandler\("shareFile", \{ base64Data, fileName \}\)/);
@@ -849,15 +849,15 @@ test("Company backups use reliable TornPDA downloads, desktop Save As, native sh
     assert.match(source, /window\.showSaveFilePicker/);
     assert.match(source, /window\.setTimeout\(\(\) => URL\.revokeObjectURL\(url\), 60000\)/);
     assert.match(source, /const saveCompanyBackup = \(\) => exportCompanyBackup\("save"\)/);
-    assert.match(source, /const shareCompanyBackup = \(\) => exportCompanyBackup\("share"\)/);
+    assert.match(source, /const useTornPdaShareFile = destination === "share" \|\| currentRuntimeMode\(\) === "tornpda"/);
     assert.match(source, /accept="\.json,application\/json,text\/json,text\/plain"/);
     assert.match(source, /function openCompanyBackupPicker\(\)/);
     assert.match(source, /typeof input\.showPicker === "function"/);
     assert.match(source, /Restore from device or Drive/);
-    assert.match(source, /Save to TornPDA Downloads/);
-    assert.match(source, /Samsung My Files does not register as a share target/);
+    assert.match(source, /Save or share backup/);
+    assert.match(source, /Samsung My Files does not register as an Android share target/);
     assert.match(source, /exportInFlight: false/);
-    assert.match(source, /Company backup opened in the TornPDA share sheet/);
+    assert.match(source, /Company backup opened in TornPDA’s native save-or-share sheet/);
     assert.match(source, /History CSV opened in the TornPDA share sheet/);
 });
 
