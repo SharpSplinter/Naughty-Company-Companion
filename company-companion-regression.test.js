@@ -4,9 +4,123 @@ const path = require("node:path");
 const test = require("node:test");
 const companion = require("./Naughty Company Companion.user.js");
 const source = fs.readFileSync(path.join(__dirname, "Naughty Company Companion.user.js"), "utf8");
+
+test("userscript version remains safe in the Node regression runtime", () => {
+    assert.match(source, /const VERSION = typeof GM_info !== "undefined"/);
+});
+
+test("TornPDA injects its primary-company key exactly once while desktop keeps manual entry", () => {
+    assert.equal((source.match(/###PDA-APIKEY###/g) || []).length, 1, "the TornPDA replacement token must occur only once in executable source");
+    assert.match(source, /const PDA_INJECTED_TORN_KEY = "###PDA-APIKEY###";/);
+    assert.equal(companion.injectedTornApiKey(), "", "an unresolved token must not be treated as a desktop API key");
+    assert.match(source, /return account \? accountKey\(account\) : activeId \? "" : injectedTornApiKey\(\);/);
+    assert.match(source, /Desktop\/Tampermonkey continues to use a manually entered key/);
+});
+
+test("startup binds an unassigned TornPDA key to its primary company without replacing the selected secondary", () => {
+    const secondaryOnly = {
+        activeCompanyId: "202",
+        companyAccounts: {
+            202: { id: "202", name: "Secondary Co", key: "secondary-key", source: "saved" }
+        }
+    };
+    assert.equal(companion.needsInjectedPrimaryDiscovery(secondaryOnly, "injected-key"), true);
+    assert.equal(companion.needsInjectedPrimaryDiscovery(secondaryOnly, ""), false);
+    assert.equal(companion.needsInjectedPrimaryDiscovery({
+        ...secondaryOnly,
+        companyAccounts: {
+            ...secondaryOnly.companyAccounts,
+            101: { id: "101", name: "Primary Co", source: "pda" }
+        }
+    }, "injected-key"), false);
+    assert.match(source, /await ensureInjectedPrimaryAccount\(\)/);
+    assert.match(source, /const selectedId = activeCompanyId\(\)/);
+    assert.match(source, /activeCompanyId: selectedId/);
+    assert.match(source, /primary-key:injected account bound/);
+});
+
+test("TornPDA key failures distinguish access problems from transient API failures", () => {
+    assert.equal(companion.requiresDirectorKey({ apiCode: 16 }), true);
+    assert.equal(companion.requiresDirectorKey({ apiCode: 2 }), true);
+    assert.equal(companion.requiresDirectorKey(new Error("Network request failed.")), false);
+    assert.match(source, /TornPDA’s API key does not have the required Company Employees access/);
+    assert.match(source, /account\?\.source === "pda" && employeesResult\.status !== "fulfilled" && requiresDirectorKey/);
+});
+
+test("Settings identifies the primary Director key source independently of the active company", () => {
+    const settings = {
+        primaryCompanyId: "101",
+        activeCompanyId: "202",
+        companyAccounts: {
+            101: { id: "101", name: "Primary Co", key: "custom-key", source: "saved" },
+            202: { id: "202", name: "Secondary Co", key: "secondary-key", source: "saved" }
+        }
+    };
+    assert.deepEqual(companion.primaryDirectorKeyStatus(settings, ""), {
+        id: "101", name: "Primary Co", source: "custom", label: "Custom saved Director key", available: true
+    });
+    settings.companyAccounts[101] = { id: "101", name: "Primary Co", source: "pda" };
+    assert.deepEqual(companion.primaryDirectorKeyStatus(settings, "injected-key"), {
+        id: "101", name: "Primary Co", source: "pda", label: "TornPDA injected key", available: true
+    });
+    assert.match(source, /<b>Primary Director key<\/b>/);
+    assert.match(source, /Key value remains hidden/);
+    assert.match(source, /filter\(\(account\) => account\.id !== primaryKey\.id\)/);
+    assert.match(source, /<span>Secondary\$\{account\.id === activeCompanyId\(\)/);
+});
+
+test("TornPDA settings reconciliation retains secondary keys without resurrecting later removals", () => {
+    const nativeBeforeRevision = {
+        primaryCompanyId: "101",
+        activeCompanyId: "101",
+        companyAccounts: {
+            101: { id: "101", name: "Primary Co", source: "pda" }
+        }
+    };
+    const legacyBeforeRevision = {
+        primaryCompanyId: "101",
+        activeCompanyId: "202",
+        companyAccounts: {
+            101: { id: "101", name: "Primary Co", key: "old-primary-key", source: "saved" },
+            202: { id: "202", name: "Secondary Co", key: "secondary-key", source: "saved" }
+        }
+    };
+    const reconciled = companion.reconcilePersistedSettings(nativeBeforeRevision, legacyBeforeRevision, 12345);
+    assert.deepEqual(Object.keys(reconciled.companyAccounts).sort(), ["101", "202"]);
+    assert.equal(reconciled.companyAccounts[101].source, "pda");
+    assert.equal(reconciled.companyAccounts[101].key, "");
+    assert.equal(reconciled.companyAccounts[202].key, "secondary-key");
+    assert.equal(reconciled.persistenceRevision, 12345);
+
+    const newerRemoval = companion.reconcilePersistedSettings(
+        { ...nativeBeforeRevision, persistenceRevision: 200 },
+        { ...legacyBeforeRevision, persistenceRevision: 100 },
+        300
+    );
+    assert.deepEqual(Object.keys(newerRemoval.companyAccounts), ["101"]);
+    assert.equal(newerRemoval.persistenceRevision, 200);
+    assert.match(source, /await legacySet\(STORE\.settings, next\[STORE\.settings\]\)/);
+});
+
+test("startup response parsing prefers populated TornPDA payload fields and retries transient invalid JSON", () => {
+    assert.equal(companion.responseBodyText({ status: 200, responseText: "", response: { company: { id: 101 } } }), '{"company":{"id":101}}');
+    assert.equal(companion.responseBodyText({ status: 200, responseText: "  ", body: { ok: true } }), '{"ok":true}');
+    assert.equal(companion.responseBodyText({ status: 200, responseText: '{"ok":true}', response: { ok: false } }), '{"ok":true}');
+    assert.match(source, /for \(let attempt = 0; attempt < 2; attempt \+= 1\)/);
+    assert.match(source, /api:invalid JSON retry/);
+});
+
+test("SPA navigation limits the companion lifecycle to companies.php", () => {
+    assert.equal(companion.isCompanyPageUrl("https://www.torn.com/companies.php#/p=employees"), true);
+    assert.equal(companion.isCompanyPageUrl("https://www.torn.com/index.php#/bazaar"), false);
+    assert.equal(companion.isCompanyPageUrl("https://www.torn.com/companies.php-extra"), false);
+    assert.match(source, /window\.setInterval\(syncPageLifecycle, 250\)/);
+    assert.match(source, /if \(!isCompanyPageUrl\(\)\) \{\s*teardownShell\(\);/);
+    assert.match(source, /stopPageRuntime\(\);\s*teardownShell\(\);/);
+});
 const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
 assert.match(source, /https:\/\/github\.com\/SharpSplinter\/Naughty-Company-Companion/);
-assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Company-Companion\/main/);
+assert.match(source, /https:\/\/raw\.githubusercontent\.com\/SharpSplinter\/Naughty-Company-Companion\/main\/Naughty%20Company%20Companion\.user\.js/);
 assert.match(source, /@license\s+MIT/);
 assert.doesNotMatch(source + readme, /xf4k31tx/);
 
@@ -208,14 +322,31 @@ test("alert delivery modes select no, all-combined, all-separate, or only active
 });
 
 test("reporting day rolls over at 18:10 UTC", () => {
-    const before = Date.UTC(2026, 7, 18, 18, 9, 59);
-    const after = Date.UTC(2026, 7, 18, 18, 10, 0);
+    const beforeSync = Date.UTC(2026, 7, 18, 18, 9, 59);
+    const syncTick = Date.UTC(2026, 7, 18, 18, 10, 0);
 
-    assert.equal(companion.reportingPeriod(before), Date.UTC(2026, 7, 17, 18, 10, 0));
-    assert.equal(companion.reportingPeriod(after), after);
+    assert.equal(companion.reportingPeriod(beforeSync), Date.UTC(2026, 7, 17, 18, 10, 0));
+    assert.equal(companion.reportingPeriod(syncTick), syncTick);
+    assert.equal(companion.dailySyncDay(beforeSync), "2026-08-17");
+    assert.equal(companion.dailySyncDay(syncTick), "2026-08-18");
+    assert.match(source, /const capturedAt = asFinite\(data\?\.fetchedAt\) \?\? Date\.now\(\);/);
+    assert.match(source, /const reportingDay = dailySyncDay\(capturedAt\);/);
 });
 
-test("daily snapshot history is de-duplicated by reporting day across the 18:05 to 18:10 migration", () => {
+test("daily snapshot history is de-duplicated across the 18:00, 18:05, and 18:10 reporting boundaries", () => {
+    const priorDay = {
+        period: Date.UTC(2026, 7, 23, 18, 10, 0),
+        reportingDay: "2026-08-23",
+        capturedAt: Date.UTC(2026, 7, 23, 18, 10, 10),
+        dailyIncome: 800,
+        weeklyIncome: 5600
+    };
+    const original = {
+        period: Date.UTC(2026, 7, 24, 18, 0, 0),
+        capturedAt: Date.UTC(2026, 7, 24, 18, 0, 10),
+        dailyIncome: 900,
+        weeklyIncome: 6300
+    };
     const legacy = {
         period: Date.UTC(2026, 7, 24, 18, 5, 0),
         capturedAt: Date.UTC(2026, 7, 24, 18, 5, 10),
@@ -230,16 +361,19 @@ test("daily snapshot history is de-duplicated by reporting day across the 18:05 
         stockAvailable: true,
         stock: { 1: { inStock: 12, onOrder: 0 } }
     };
-    const normalized = companion.normalizeHistory({ 101: [legacy, current] })[101];
+    const normalized = companion.normalizeHistory({ 101: [priorDay, original, legacy, current] })[101];
 
+    assert.equal(companion.historySnapshotDay(original), "2026-08-24");
     assert.equal(companion.historySnapshotDay(legacy), "2026-08-24");
     assert.equal(companion.historySnapshotDay(current), "2026-08-24");
-    assert.equal(normalized.length, 1);
-    assert.equal(normalized[0].reportingDay, "2026-08-24");
-    assert.equal(normalized[0].period, current.period);
-    assert.equal(normalized[0].dailyIncome, 1000);
-    assert.equal(normalized[0].dailyProfit, 800);
-    assert.equal(normalized[0].stock[1].inStock, 12);
+    assert.equal(normalized.length, 2);
+    assert.equal(normalized[0].reportingDay, "2026-08-23");
+    assert.equal(normalized[0].dailyIncome, 800);
+    assert.equal(normalized[1].reportingDay, "2026-08-24");
+    assert.equal(normalized[1].period, current.period);
+    assert.equal(normalized[1].dailyIncome, 1000);
+    assert.equal(normalized[1].dailyProfit, 800);
+    assert.equal(normalized[1].stock[1].inStock, 12);
     assert.match(source, /const priorSnapshots = history\.filter\(\(entry\) => historySnapshotDay\(entry, period\) === reportingDay\);/);
     assert.match(source, /mergeHistorySnapshot\(existingSnapshot, row\)/);
 });
@@ -418,7 +552,7 @@ test("daily alerts require an explicit scope and independently opt-in delivery c
 });
 
 test("daily alert toasts keep full messages stacked instead of replacing one another", () => {
-    const dailyToast = source.match(/async function showDailyToast[\s\S]*?\n    }\n\n    function companyPageUrl/);
+    const dailyToast = source.match(/async function showDailyToast[\s\S]*?\r?\n    }\r?\n\r?\n    function companyPageUrl/);
     assert.ok(dailyToast);
     assert.match(dailyToast[0], /showDesktopToast\(text, tone, 10\)/);
     assert.match(dailyToast[0], /callConfirmedPdaHandler\("showToast"/);
@@ -754,19 +888,32 @@ test("Company backup v2 isolates company keys and migrates legacy single-company
     assert.deepEqual(unboundLegacy.settings.companyAccounts, {});
     assert.doesNotMatch(source.match(/const activeTornApiKey[\s\S]*?;/)?.[0] || "", /state\.settings\.tornKey/);
     assert.throws(() => companion.validateCompanyBackupDocument({ ...backup, namespace: "other-companion" }), /wrong script namespace/);
-    assert.match(source, /data-action="download-company-backup"/);
+    assert.match(source, /data-action="save-company-backup"/);
+    assert.doesNotMatch(source, /data-action="share-company-backup"/);
+    assert.match(source, /data-action="choose-company-backup"/);
     assert.match(source, /case "confirm-backup-restore"/);
 });
 
-test("Company backup and CSV exports use the TornPDA share sheet with a local-download fallback", () => {
+test("Company backups use one Save Backup action with browser save, TornPDA shareFile, and Google Drive restore", () => {
     assert.equal(companion.utf8Base64("Income,Profit\n1,2"), "SW5jb21lLFByb2ZpdAoxLDI=");
     assert.match(source, /async function shareTextWithTornPDA\(text, fileName\)/);
     assert.match(source, /bridge\.callHandler\("shareFile", \{ base64Data, fileName \}\)/);
     assert.match(source, /response\?\.status === "success"/);
-    assert.match(source, /async function exportTextFile\(text, fileName, type\)/);
+    assert.match(source, /async function saveTextFileToLocalFilesystem\(text, fileName, type\)/);
+    assert.match(source, /const tornPdaRuntime = currentRuntimeMode\(\) === "tornpda"/);
+    assert.match(source, /if \(!tornPdaRuntime && typeof window !== "undefined" && typeof window\.showSaveFilePicker === "function"\)/);
+    assert.match(source, /window\.showSaveFilePicker/);
+    assert.match(source, /window\.setTimeout\(\(\) => URL\.revokeObjectURL\(url\), 60000\)/);
+    assert.match(source, /const saveCompanyBackup = \(\) => exportCompanyBackup\("save"\)/);
+    assert.match(source, /const useTornPdaShareFile = destination === "share" \|\| currentRuntimeMode\(\) === "tornpda"/);
+    assert.match(source, /accept="\.json,application\/json,text\/json,text\/plain"/);
+    assert.match(source, /function openCompanyBackupPicker\(\)/);
+    assert.match(source, /typeof input\.showPicker === "function"/);
+    assert.match(source, /Restore from device or Google Drive/);
+    assert.match(source, /data-action="save-company-backup">Save Backup</);
+    assert.match(source, /select Google Drive in the share sheet to store the backup there/);
     assert.match(source, /exportInFlight: false/);
-    assert.match(source, /const result = await exportTextFile\(JSON\.stringify\(backup, null, 2\), backupFileName\(\), "application\/json;charset=utf-8"\)/);
-    assert.match(source, /Company backup opened in the TornPDA share sheet/);
+    assert.match(source, /Company backup opened in TornPDA’s native save-or-share sheet/);
     assert.match(source, /History CSV opened in the TornPDA share sheet/);
 });
 

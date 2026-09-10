@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naughty Company Companion
 // @namespace    https://github.com/SharpSplinter/Naughty-Company-Companion
-// @version      1.3.41
+// @version      1.3.42
 // @description  Company income, profit, efficiency, stock, rankings, and staffing companion for Torn.
 // @author       SharpSplinter [315311]
 // @license      MIT
@@ -26,11 +26,13 @@
 (() => {
     "use strict";
 
-    const VERSION = GM_info.script.version;
+    const VERSION = typeof GM_info !== "undefined" && GM_info?.script?.version ? GM_info.script.version : "1.3.42";
 
     const ROOT_ID = "ncc-root";
     const TORN_API = "https://api.torn.com/v2";
-    const PDA_INJECTED_TORN_KEY = "_###PDA-APIKEY###_";
+    // TornPDA replaces this exact token at runtime. Keep it as the token's only
+    // occurrence in executable source so the unresolved-key check is not replaced too.
+    const PDA_INJECTED_TORN_KEY = "###PDA-APIKEY###";
     const DAY = 86400000;
     const DAILY_TICK_HOUR_UTC = 18;
     const DAILY_SYNC_MINUTE_UTC = 10;
@@ -82,6 +84,8 @@
     const DEFAULT_SETTINGS = {
         companyAccounts: {},
         activeCompanyId: "",
+        primaryCompanyId: "",
+        persistenceRevision: 0,
         dailyAlertMode: "off",
         sourceTimes: {},
         includeStockCost: true,
@@ -161,9 +165,12 @@
         panelHeight: null,
         releaseTimer: null
     };
-    const responsiveLayoutRuntime = { observer: null, frame: null };
+    const responsiveLayoutRuntime = { observer: null, frame: null, update: null };
+    const lifecycleRuntime = { booted: false, active: false, monitorId: null, viewportListenersBound: false };
     // Static role requirements; local calculations never transmit employee statistics.
     // Source data verified 2026-08-25 against Torn's public company position reference.
+    const POSITION_NAME_ALIASES = Object.freeze({ Armourer: "Armorer" });
+    const normalizedPositionName = (value) => POSITION_NAME_ALIASES[String(value || "")] || String(value || "");
     const POSITION_REQUIREMENTS_B64 = "eyJIYWlyIFNhbG9uIjp7IlN0eWxpc3QiOlsxNTAwLDAsNzUwXSwiQ29sb3Jpc3QiOlsyMDAwLDAsMTAwMF0sIk5haWwgVGVjaG5pY2lhbiI6Wzc1MCwwLDE1MDBdLCJBcHByZW50aWNlIjpbNTAwLDAsMjUwXSwiU2hhbXBvb2lzdCI6WzEwMDAsMCw1MDBdLCJTZW5pb3IgU3R5bGlzdCI6WzMwMDAsMCwxNTAwXSwiUmVjZXB0aW9uaXN0IjpbMCwxMjUwLDI1MDBdLCJUcmFpbmVyIjpbMCw0NTAwLDIyNTBdLCJBZXN0aGV0aWNpYW4iOlswLDQ1MDAsMjI1MF19LCJMYXcgRmlybSI6eyJDbGVhbmVyIjpbNTUwMCwwLDI3NTBdLCJNYXJrZXRlciI6WzAsMjIwMDAsMTEwMDBdLCJDb25zdWx0YW50IjpbMCwzMzAwMCwxNjUwMF0sIlNlY3JldGFyeSI6WzAsODI1MCwxNjUwMF0sIkFzc2lzdGFudCI6WzAsMjc1MCw1NTAwXSwiQXR0b3JuZXkiOlswLDExMDAwLDU1MDBdfSwiRmxvd2VyIFNob3AiOnsiRmxvcmlzdCI6WzUwMCwwLDEwMDBdLCJBcnJhbmdlciI6WzUwMCwxMDAwLDBdLCJBcHByZW50aWNlIjpbMjUwLDAsNTAwXSwiQ2xlYW5lciI6WzUwMCwwLDI1MF0sIk1hbmFnZXIiOlswLDEwMDAsMjAwMF0sIk1hcmtldGVyIjpbMCwyMDAwLDEwMDBdLCJBY2NvdW50YW50IjpbMCw3NTAsMTUwMF19LCJDYXIgRGVhbGVyc2hpcCI6eyJUcmFpbmluZyBBZHZpc2VyIjpbMCw2MzAwMCwzMTUwMF0sIk1hbmFnZXIiOlswLDIxMDAwLDQyMDAwXSwiV2VibWFzdGVyIjpbMCw0MjAwMCwyMTAwMF0sIlJlY2VwdGlvbmlzdCI6WzAsMTU3NTAsMzE1MDBdLCJNZWNoYW5pYyI6WzI2NTAwLDAsMTMyNTBdLCJTYWxlcyBFeGVjdXRpdmUiOlswLDIxMDAwLDEwNTAwXSwiQ2xlYW5lciI6WzEwNTAwLDAsNTI1MF0sIlNhbGVzIEFwcHJlbnRpY2UiOlswLDU1MDAsMjc1MF19LCJDbG90aGluZyBTdG9yZSI6eyJMaW5lIE1hbmFnZXIiOlswLDYwMDAsMzAwMF0sIlN0b3JlIE1hbmFnZXIiOlswLDIwMDAsNDAwMF0sIk1hcmtldGluZyBNYW5hZ2VyIjpbMCw0MDAwLDIwMDBdLCJBY2NvdW50YW50IjpbMCwxNTAwLDMwMDBdLCJTZWN1cml0eSBHdWFyZCI6WzMwMDAsMCwxNTAwXSwiU2FsZXNwZXJzb24iOlswLDIwMDAsMTAwMF0sIkNhc2hpZXIiOls3NTAsMCwxNTAwXSwiQ2xlYW5lciI6WzEwMDAsMCw1MDBdLCJTYWxlcyBUcmFpbmVlIjpbMCw1MDAsMjUwXX0sIkd1biBTaG9wIjp7IkNsZXJrIjpbMzc1MCwwLDc1MDBdLCJHdW5zbWl0aCI6WzE1MDAwLDc1MDAsMF0sIkNsZWFuZXIiOls0MDAwLDAsMjAwMF0sIk1hbmFnZXIiOlswLDc1MDAsMTUwMDBdLCJCb29ra2VlcGVyIjpbMCw1NzUwLDExNTAwXSwiTWFya2V0ZXIiOlswLDE1MDAwLDc1MDBdLCJJbnN0cnVjdG9yIjpbMCwyMjUwMCwxMTI1MF19LCJHYW1lIFNob3AiOnsiQ2xlcmsiOlsxNTAwLDAsMzAwMF0sIkdhbWUgQWR2aXNvciI6WzAsNDUwMCwyMjUwXSwiQ2xlYW5lciI6WzE1MDAsMCw3NTBdLCJTdG9yZSBNYW5hZ2VyIjpbMCwzMDAwLDYwMDBdLCJBY2NvdW50YW50IjpbMCwyMjUwLDQ1MDBdLCJNYXJrZXRlciI6WzAsNjAwMCwzMDAwXX0sIkNhbmRsZSBTaG9wIjp7IkNoYW5kbGVyIjpbNDUwMCwyMjUwLDBdLCJUcmFpbmVyIjpbMCw0NTAwLDIyNTBdLCJRdWFsaXR5IENvbnRyb2wiOlswLDE1MDAsMzAwMF0sIkJvb2trZWVwZXIiOlswLDEyNTAsMjUwMF0sIlNhbGVzcGVyc29uIjpbMCw3NTAsMTUwMF0sIkNsZWFuZXIiOlsxMDAwLDAsNTAwXX0sIlRveSBTaG9wIjp7IlNhbGVzIEFzc2lzdGFudCI6WzI1MDAsMCw1MDAwXSwiQ2xlYW5lciI6WzI1MDAsMCwxMjUwXSwiU3RvcmUgTWFuYWdlciI6WzAsNTAwMCwxMDAwMF0sIk9mZmljZSBDbGVyayI6WzAsMzc1MCw3NTAwXSwiTWFya2V0aW5nIEV4ZWN1dGl2ZSI6WzAsMTAwMDAsNTAwMF0sIlRyYWluaW5nIEFkdmlzb3IiOlswLDE1MDAwLDc1MDBdLCJTdG9jayBDbGVyayI6WzQwMDAsMCwyMDAwXX0sIkFkdWx0IE5vdmVsdGllcyI6eyJIdW1hbiBSZXNvdXJjZXMiOlswLDEyMDAwLDYwMDBdLCJTZXhwZXJ0IjpbMCwxMDAwMCw1MDAwXSwiU3RvcmUgTWFuYWdlciI6WzAsNDAwMCw4MDAwXSwiTWFya2V0aW5nIE1hbmFnZXIiOlswLDgwMDAsNDAwMF0sIlJlY2VwdGlvbmlzdCI6WzAsMzAwMCw2MDAwXSwiU2FsZXMgQXNzaXN0YW50IjpbMjAwMCwwLDQwMDBdLCJDbGVhbmVyIjpbMjAwMCwwLDEwMDBdfSwiQ3liZXIgQ2FmZSI6eyJDYXNoaWVyIjpbMCw1MDAwLDEwMDAwXSwiQ2xlYW5lciI6WzUwMDAsMCwyNTAwXSwiTWFuYWdlciI6WzAsMTAwMDAsMjAwMDBdLCJSZWNlcHRpb25pc3QiOlswLDc1MDAsMTUwMDBdLCJNYXJrZXRlciI6WzAsMjAwMDAsMTAwMDBdLCJUZWFjaGVyIjpbMCwzMDAwMCwxNTAwMF0sIkFkbWluaXN0cmF0b3IiOlswLDIwMDAwLDEwMDAwXSwiVGVjaG5pY2lhbiI6Wzg3NTAsMTc1MDAsMF19LCJHcm9jZXJ5IFN0b3JlIjp7IkNhc2hpZXIiOlszMDAwLDAsNjAwMF0sIlN0b2NrIENsZXJrIjpbNDUwMCwwLDIyNTBdLCJDbGVhbmVyIjpbMzAwMCwwLDE1MDBdLCJNYW5hZ2VyIjpbMCw2MDAwLDEyMDAwXSwiQWNjb3VudGFudCI6WzAsNDUwMCw5MDAwXSwiTWFya2V0ZXIiOlswLDEyMDAwLDYwMDBdLCJUcmFpbmVyIjpbMCwxODAwMCw5MDAwXSwiRGVsaXZlcnkgRHJpdmVyIjpbNzUwMCwwLDM3NTBdLCJDYXJ0IEF0dGVuZGFudCI6WzMwMDAsMCwxNTAwXX0sIlRoZWF0ZXIiOnsiVGlja2V0aW5nIEFnZW50IjpbMCwxMDAwMCwyMDAwMF0sIlRlY2huaWNpYW4iOls2MDAwMCwzMDAwMCwwXSwiUHJvZ3JhbW1lciI6WzAsNTAwMDAsMjUwMDBdLCJKYW5pdG9yIjpbMjAwMDAsMCwxMDAwMF0sIk1hbmFnZXIiOlswLDQwMDAwLDgwMDAwXSwiQWNjb3VudGFudCI6WzAsMzAwMDAsNjAwMDBdLCJNYXJrZXRpbmcgTWFuYWdlciI6WzAsODAwMDAsNDAwMDBdLCJVc2hlciI6WzEwMDAwLDAsMjAwMDBdfSwiU3dlZXQgU2hvcCI6eyJDb25mZWN0aW9uaXN0IjpbMCwyNTAwLDEyNTBdLCJQYWNrYWdlciI6Wzc1MCwwLDE1MDBdLCJDbGVhbmVyIjpbMTAwMCwwLDUwMF0sIk1hbmFnZXIiOlswLDIwMDAsNDAwMF0sIkJvb2trZWVwZXIiOlswLDE1MDAsMzAwMF0sIk1hcmtldGVyIjpbMCw0MDAwLDIwMDBdLCJDbGVyayI6WzEwMDAsMCwyMDAwXX0sIkNydWlzZSBMaW5lIjp7IkNhcHRhaW4iOlswLDE1NDUwMCw3NzI1MF0sIkZpcnN0IE9mZmljZXIiOlswLDEwNTAwMCw1MjUwMF0sIkRvY3RvciI6WzAsMTAzMDAwLDUxNTAwXSwiU3BlY2lhbGlzdCI6WzAsOTAwMDAsNDUwMDBdLCJCb3N1biI6WzAsMzcwMDAsNzQwMDBdLCJNYXJrZXRlciI6WzAsNzIwMDAsMzYwMDBdLCJDaGVmIjpbMCw2NDUwMCwzMjI1MF0sIkVuZ2luZWVyIjpbNTQ1MDAsMjcyNTAsMF0sIlJlY2VwdGlvbmlzdCI6WzAsMjEwMDAsNDIwMDBdLCJTdGV3YXJkIjpbMCwyMDc1MCw0MTUwMF0sIkJhcnRlbmRlciI6WzE5MjUwLDAsMzg1MDBdLCJEZWNraGFuZCI6WzI2MDAwLDAsMTMwMDBdLCJUaWNrZXQgQWdlbnQiOlswLDEzMDAwLDI2MDAwXX0sIlRlbGV2aXNpb24gTmV0d29yayI6eyJQcm9kdWNlciI6WzAsOTkwMDAsNDk1MDBdLCJQcm9ncmFtbWVyIjpbMCw2NjAwMCwzMzAwMF0sIkNhbWVyYSBPcGVyYXRvciI6WzI0NzUwLDQ5NTAwLDBdLCJTYWxlcyBFeGVjdXRpdmUiOlswLDI0NzUwLDQ5NTAwXSwiQ2xlYW5lciI6WzMzMDAwLDAsMTY1MDBdLCJBdHRvcm5leSI6WzAsMTMyMDAwLDY2MDAwXSwiU2VjcmV0YXJ5IjpbMCw0OTUwMCw5OTAwMF0sIk1hcmtldGVyIjpbMCwxMzIwMDAsNjYwMDBdLCJXcml0ZXIiOlswLDExNTUwMCw1Nzc1MF0sIlN0YWdlaGFuZCI6WzMzMDAwLDAsMTY1MDBdLCJBbmNob3IiOlswLDEzMjAwMCw2NjAwMF0sIlJlcG9ydGVyIjpbMCw4MjUwMCw0MTI1MF19LCJab28iOnsiWm9vIEtlZXBlciI6WzU4MDAwLDAsMjkwMDBdLCJBbmltYWwgVHJhaW5lciI6WzM2MjUwLDcyNTAwLDBdLCJBcXVhcmlzdCI6WzAsMjkwMDAsNTgwMDBdLCJJbnRlcm4iOlsxNDUwMCwwLDcyNTBdLCJNYW5hZ2VyIjpbMCw1ODAwMCwxMTYwMDBdLCJCb29ra2VlcGVyIjpbMCw0MzUwMCw4NzAwMF0sIlBob3RvZ3JhcGhlciI6WzAsMTE2MDAwLDU4MDAwXSwiQ29uc3VsdGFudCI6WzAsMTc0MDAwLDg3MDAwXSwiVmV0ZXJpbmFyaWFuIjpbNTgwMDAsMTE2MDAwLDBdLCJDYXNoaWVyIjpbMCwxNDUwMCwyOTAwMF19LCJBbXVzZW1lbnQgUGFyayI6eyJJbnNwZWN0b3IiOlswLDEzNTAwMCw2NzUwMF0sIk1hbmFnZXIiOlswLDQ1MDAwLDkwMDAwXSwiTWFya2V0ZXIiOlswLDkwMDAwLDQ1MDAwXSwiU2VjdXJpdHkgR3VhcmQiOls3OTAwMCwwLDM5NTAwXSwiTWVjaGFuaWMiOls2NzUwMCwzMzc1MCwwXSwiQWNjb3VudGFudCI6WzAsMzM3NTAsNjc1MDBdLCJSaWRlIEF0dGVuZGFudCI6WzAsMjI1MDAsNDUwMDBdLCJFbnRlcnRhaW5lciI6WzM0MDAwLDAsMTcwMDBdLCJUaWNrZXQgQWdlbnQiOlswLDExMjUwLDIyNTAwXSwiSmFuaXRvciI6WzIyNTAwLDAsMTEyNTBdfSwiRnVybml0dXJlIFN0b3JlIjp7IlNhbGVzIENsZXJrIjpbMCwzMjUwLDY1MDBdLCJEZWxpdmVyeSBEcml2ZXIiOls4MDAwLDAsNDAwMF0sIkFwcHJlbnRpY2UiOlswLDc1MCwxNTAwXSwiQ2xlYW5lciI6WzM1MDAsMCwxNzUwXSwiTWFuYWdlciI6WzAsNjUwMCwxMzAwMF0sIlJlY2VwdGlvbmlzdCI6WzAsNTAwMCwxMDAwMF0sIk1hcmtldGVyIjpbMCwxMzAwMCw2NTAwXSwiVHJhaW5lciI6WzAsMTk1MDAsOTc1MF19LCJHYXMgU3RhdGlvbiI6eyJBdHRlbmRhbnQiOlswLDEzMDAwLDI2MDAwXSwiQ2xlYW5lciI6WzE3NTAwLDAsODc1MF0sIk1hbmFnZXIiOlswLDMwMDAwLDYwMDAwXSwiTWFya2V0ZXIiOlswLDQwMDAwLDIwMDAwXSwiVHJhaW5lciI6WzAsNzA1MDAsMzUyNTBdfSwiTXVzaWMgU3RvcmUiOnsiU2FsZXMgQXNzaXN0YW50IjpbMCwxNzUwLDM1MDBdLCJNdXNpY2lhbiI6WzQ1MDAsOTAwMCwwXSwiU2FsZXMgQXBwcmVudGljZSI6WzAsNTAwLDEwMDBdLCJDbGVhbmVyIjpbMjAwMCwwLDEwMDBdLCJTdXBlcnZpc29yIjpbMCwzNTAwLDcwMDBdLCJCb29ra2VlcGVyIjpbMCwyNzUwLDU1MDBdLCJUcmFpbmVyIjpbMCwxMDUwMCw1MjUwXX0sIk5pZ2h0Y2x1YiI6eyJCYXJ0ZW5kZXIiOlsxMzUwMCwwLDI3MDAwXSwiQm91bmNlciI6WzQ4MDAwLDAsMjQwMDBdLCJCYXJiYWNrIjpbMTAyNTAsMCwyMDUwMF0sIkNsZWFuZXIiOlsxMzUwMCwwLDY3NTBdLCJNYW5hZ2VyIjpbMCwyNzAwMCw1NDAwMF0sIlBlcnNvbmFsIEFzc2lzdGFudCI6WzAsMjAyNTAsNDA1MDBdLCJQcm9tb3RlciI6WzAsNTQwMDAsMjcwMDBdLCJUcmFpbmVyIjpbMCw4MTAwMCw0MDUwMF0sIkRpc2stam9ja2V5IjpbMCw0MDUwMCwyMDI1MF19LCJQdWIiOnsiQmFydGVuZGVyIjpbMTUwMCwwLDMwMDBdLCJCb3VuY2VyIjpbNjAwMCwwLDMwMDBdLCJXYWl0ZXIiOlsxNTAwLDAsMzAwMF0sIkNsZWFuZXIiOlsxNTAwLDAsNzUwXSwiTWFuYWdlciI6WzAsMzAwMCw2MDAwXSwiQm9va2tlZXBlciI6WzAsMjI1MCw0NTAwXSwiVHJhaW5lciI6WzAsOTAwMCw0NTAwXSwiUHJvbW90ZXIiOlswLDYwMDAsMzAwMF19LCJSZXN0YXVyYW50Ijp7IldhaXRlciI6WzEyNTAsMCwyNTAwXSwiU291cyBDaGVmIjpbMCw0MDAwLDIwMDBdLCJIZWFkIENoZWYiOlswLDI1MDAsNTAwMF0sIktpdGNoZW4gQXNzaXN0YW50IjpbMTUwMCwwLDc1MF0sIkhlYWQgV2FpdGVyIjpbMCwyMDAwLDQwMDBdLCJMaW5lIENvb2siOlsxMjUwLDI1MDAsMF0sIkNoZWYiOlsxNTAwLDMwMDAsMF0sIkFwcHJlbnRpY2UgQ2hlZiI6Wzc1MCwxNTAwLDBdLCJEaXNod2FzaGVyIjpbMTUwMCwwLDc1MF19LCJTb2Z0d2FyZSBDb3Jwb3JhdGlvbiI6eyJEZXZlbG9wZXIiOlswLDI0MDAwLDEyMDAwXSwiVGVzdGVyIjpbMCwxMjAwMCw2MDAwXSwiR3JhcGhpYyBEZXNpZ25lciI6WzAsMTgwMDAsOTAwMF0sIkFwcHJlbnRpY2UiOlswLDYwMDAsMzAwMF0sIkNsZWFuZXIiOlsxMjAwMCwwLDYwMDBdLCJMZWFkIERldmVsb3BlciI6WzAsMjQwMDAsNDgwMDBdLCJBbmFseXN0IjpbMCwxODAwMCwzNjAwMF0sIk1hcmtldGVyIjpbMCw0ODAwMCwyNDAwMF0sIkNvbnN1bHRhbnQiOlswLDcyMDAwLDM2MDAwXX0sIk1lY2hhbmljIFNob3AiOnsiVGVjaG5pY2lhbiI6Wzg1MDAsMCw0MjUwXSwiQXBwcmVudGljZSBUZWNobmljaWFuIjpbMjAwMCwwLDEwMDBdLCJDbGVhbmVyIjpbNDUwMCwwLDIyNTBdLCJNYW5hZ2VyIjpbMCw4NTAwLDE3MDAwXSwiUmVjZXB0aW9uaXN0IjpbMCw2NTAwLDEzMDAwXSwiVHJhaW5lciI6WzAsMjU1MDAsMTI3NTBdfSwiRml0bmVzcyBDZW50ZXIiOnsiUGVyc29uYWwgVHJhaW5lciI6WzMxMDAwLDAsMTU1MDBdLCJTd2ltbWluZyBJbnN0cnVjdG9yIjpbMjMyNTAsMCw0NjUwMF0sIkxpZmVndWFyZCI6WzE5NTAwLDAsMzkwMDBdLCJDbGVhbmVyIjpbMTU1MDAsMCw3NzUwXSwiTWFuYWdlciI6WzAsMzEwMDAsNjIwMDBdLCJSZWNlcHRpb25pc3QiOlswLDUwMDAsMTAwMDBdLCJNYXJrZXRlciI6WzAsNjIwMDAsMzEwMDBdLCJIdW1hbiBSZXNvdXJjZXMiOlswLDIzMjUwLDQ2NTAwXSwiTnV0cml0aW9uaXN0IjpbMjcyNTAsNTQ1MDAsMF0sIkZpdG5lc3MgSW5zdHJ1Y3RvciI6WzQ2NTAwLDAsMjMyNTBdfSwiTGluZ2VyaWUgU3RvcmUiOnsiU2FsZXNwZXJzb24iOlswLDIyNTAsNDUwMF0sIkNsZWFuZXIiOlsyNTAwLDAsMTI1MF0sIlN0b3JlIE1hbmFnZXIiOlswLDQ1MDAsOTAwMF0sIkxpbmdlcmllIE1vZGVsIjpbMCw5MDAwLDQ1MDBdLCJIdW1hbiBSZXNvdXJjZXMiOlswLDEzNTAwLDY3NTBdLCJUcmFpbmVlIjpbMCw1MDAsMTAwMF19LCJGYXJtIjp7IkhhcnZlc3RlciI6WzE0MDAwLDAsNzAwMF0sIkRlbGl2ZXJ5IERyaXZlciI6WzIzMDAwLDAsMTE1MDBdLCJIZXJkc3BlcnNvbiI6WzE4NTAwLDAsOTI1MF0sIkZhcm0gTWFuYWdlciI6WzAsMTg1MDAsMzcwMDBdLCJCb29ra2VlcGVyIjpbMCwxNDAwMCwyODAwMF0sIkNvbnN1bHRhbnQiOlswLDU1NTAwLDI3NzUwXSwiUmV0YWlsZXIiOlswLDE4NTAwLDkyNTBdLCJEYWlyeSBGYXJtZXIiOlsyMzAwMCwwLDExNTAwXSwiUG91bHRyeSBGYXJtZXIiOlsxODUwMCwwLDkyNTBdfSwiTWluaW5nIENvcnBvcmF0aW9uIjp7IlNhbGVzIEV4ZWN1dGl2ZSI6WzAsODMwMDAsNDE1MDBdLCJNaWxsIE9wZXJhdG9yIjpbNzUwMDAsMCwzNzUwMF0sIlByb2R1Y3Rpb24gRm9yZW1hbiI6WzM5NTAwLDAsNzkwMDBdLCJNaW5lIEVuZ2luZWVyIjpbMCw4MTAwMCw0MDUwMF0sIkVsZWN0cmljaWFuIjpbMzkwMDAsMCw3ODAwMF0sIlNhZmV0eSBJbnNwZWN0b3IiOls0NzUwMCw5NTAwMCwwXSwiU2l0ZSBNYW5hZ2VyIjpbMCw5NzAwMCw0ODc1MF0sIlNlY3JldGFyeSI6WzAsMzkwMDAsNzgwMDBdfSwiT2lsIFJpZyI6eyJEcmlsbGVyIjpbMTUwMDAwLDc1MDAwLDBdLCJSb3VnaG5lY2siOls3NTAwMCwwLDM3NTAwXSwiRGVycmljayBIYW5kIjpbOTQwMDAsMCw0NzAwMF0sIlNlY3JldGFyeSI6WzAsNTYyNTAsMTEyNTAwXSwiSW5zcGVjdG9yIjpbMCwyMjUwMDAsMTEyNTAwXSwiU2FsZXMgRXhlY3V0aXZlIjpbMCwxMzE1MDAsNjU3NTBdLCJNb3RvciBIYW5kIjpbMTEyNTAwLDU2MjUwLDBdfSwiUHJvcGVydHkgQnJva2VyIjp7IlByb3BlcnR5IEJyb2tlciI6WzAsNzUwLDE1MDBdLCJWYWx1YXRpb24gU3BlY2lhbGlzdCI6WzAsMzAwMCwxNTAwXSwiQXNzb2NpYXRlIEJyb2tlciI6WzAsMjUwLDUwMF0sIkNsZWFuZXIiOlsxMDAwLDAsNTAwXSwiVGVhbSBNYW5hZ2VyIjpbMCwxNTAwLDMwMDBdLCJSZWNlcHRpb25pc3QiOlswLDEyNTAsMjUwMF0sIkdyYXBoaWMgRGVzaWduZXIiOlswLDMwMDAsMTUwMF0sIkJyb2tlciBTdXBwb3J0IjpbMCw0NTAwLDIyNTBdfSwiUHJpdmF0ZSBTZWN1cml0eSBGaXJtIjp7IlNlY3VyaXR5IENvbnRyYWN0b3IiOls3MDAwMCwwLDM1MDAwXSwiVGVhbSBMZWFkZXIiOlsxMTAwMDAsMCw1NTAwMF0sIkRlZmVuY2UgQ29uc3VsdGFudCI6WzAsMTM1MDAwLDY3NTAwXSwiU3Bva2VzcGVyc29uIjpbMCw4MDAwMCw0MDAwMF0sIkNvbXBhbnkgTGlhaXNvbiI6WzAsNTc1MDAsMTE1MDAwXSwiQ2hpZWYgU3RyYXRlZ2lzdCI6WzAsMTY1MDAwLDgyNTAwXSwiUmVjb25uYWlzc2FuY2UiOls4MDAwMCw0MDAwMCwwXSwiRGlzcG9zYWwgRW5naW5lZXIiOlswLDg1MDAwLDQyNTAwXSwiQXJtb3VyZXIiOls0MDAwMCwwLDgwMDAwXSwiTWVkaWMiOlswLDkwMDAwLDQ1MDAwXSwiQ29tbXMgRW5naW5lZXIiOlswLDg1MDAwLDQyNTAwXX0sIkRldGVjdGl2ZSBBZ2VuY3kiOnsiUHJpdmF0ZSBJbnZlc3RpZ2F0b3IiOlsyMjUwMCw0NTUwMCwwXSwiVHJhaW5lZSBJbnZlc3RpZ2F0b3IiOlsxNDAwMCwyODAwMCwwXSwiU2VjcmV0YXJ5IjpbMTI1MDAsMCwyNTAwMF0sIkludGVsbGlnZW5jZSBBbmFseXN0IjpbMCw1ODAwMCwyOTAwMF0sIlN1cnZlaWxsYW5jZSI6WzI2MDAwLDUyMDAwLDBdLCJDaGllZiBJbnZlc3RpZ2F0b3IiOls0MDAwMCw4MDAwMCwwXSwiQ2xpZW50IExpYWlzb24iOlswLDYyMDAwLDMxMDAwXX0sIkZpcmV3b3JrIFN0YW5kIjp7IlNhbGVzcGVyc29uIjpbMCw1MDAsMTAwMF0sIlB5cm90ZWNobmljaWFuIjpbMzAwMCwxNTAwLDBdLCJQaWNrZXIgIFBhY2tlciI6WzUwMCwwLDI1MF0sIk1hbmFnZXIiOlswLDEwMDAsMjAwMF0sIkJvb2trZWVwZXIiOlswLDc1MCwxNTAwXSwiQWR2ZXJ0aXNpbmcgTWFuYWdlciI6WzAsMjAwMCwxMDAwXSwiVHJhaW5lciI6WzAsMzAwMCwxNTAwXX0sIk1lYXQgV2FyZWhvdXNlIjp7IlF1YWxpdHkgQ29udHJvbGxlciI6WzEyNTAwLDI1MDAwLDBdLCJQYWNrZXIiOls5NTAwLDAsNDc1MF0sIkFwcHJlbnRpY2UgQnV0Y2hlciI6WzMwMDAsMCwxNTAwXSwiQ2xlYW5lciI6WzY1MDAsMCwzMjUwXSwiTWFuYWdlciI6WzAsMTI1MDAsMjUwMDBdLCJBc3Npc3RhbnQiOlswLDk1MDAsMTkwMDBdLCJTdXBlcnZpc29yIjpbMCwzNzUwMCwxODc1MF0sIkJ1dGNoZXIiOlsxMjUwMCwwLDYyNTBdLCJSZXRhaWxlciI6WzAsMTI1MDAsNjI1MF19LCJMb2dpc3RpY3MgTWFuYWdlbWVudCI6eyJMdW1wZXIiOls0NTAwMCwwLDIyNTAwXSwiRHJpdmVyIjpbMjg3NTAsMCw1NzUwMF0sIkZvcmtsaWZ0IE9wZXJhdG9yIjpbMzAwMDAsMCw2MDAwMF0sIlRyYW5zcG9ydCBDb29yZGluYXRvciI6WzAsODUwMDAsNDI1MDBdLCJXYXJlaG91c2UgTWFuYWdlciI6WzAsMTE1MDAwLDU3NTAwXSwiU2hpZnQgTWFuYWdlciI6WzAsOTAwMDAsNDUwMDBdLCJTdXBwbHkgQ2hhaW4gTWFuYWdlciI6WzAsMTI1MDAwLDYyNTAwXSwiUHJvY3VyZW1lbnQgTWFuYWdlciI6WzAsMTQwMDAwLDcwMDAwXX0sIkdlbnRzIFN0cmlwIENsdWIiOnsiU3RyaXBwZXIiOls3MjUwLDAsMTQ1MDBdLCJTZWN1cml0eSI6WzI5MDAwLDAsMTQ1MDBdLCJDbGVhbmVyIjpbNzUwMCwwLDM3NTBdLCJNYW5hZ2VyIjpbMCwxNDUwMCwyOTAwMF0sIkJvb2trZWVwZXIiOlswLDExMDAwLDIyMDAwXSwiUGhvdG9ncmFwaGVyIjpbMCwyOTAwMCwxNDUwMF19fQ==";
     const decodeBase64Text = (value) => {
         if (typeof atob === "function") return atob(value);
@@ -172,7 +179,16 @@
     };
     const POSITION_REQUIREMENTS = (() => {
         try {
-            return Object.freeze(JSON.parse(decodeBase64Text(POSITION_REQUIREMENTS_B64)));
+            const decoded = JSON.parse(decodeBase64Text(POSITION_REQUIREMENTS_B64));
+            Object.values(decoded).forEach((positions) => {
+                Object.entries(positions || {}).forEach(([name, requirements]) => {
+                    const normalized = normalizedPositionName(name);
+                    if (normalized === name) return;
+                    positions[normalized] = requirements;
+                    delete positions[name];
+                });
+            });
+            return Object.freeze(decoded);
         } catch {
             return Object.freeze({});
         }
@@ -232,20 +248,53 @@
         if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
         return `${Math.floor(seconds / 86400)}d ago`;
     };
+    const isCompanyPageUrl = (value = typeof window !== "undefined" ? window.location.href : "") => {
+        try {
+            return /\/companies\.php$/i.test(new URL(String(value), "https://www.torn.com").pathname);
+        } catch {
+            return false;
+        }
+    };
     const documentIsHidden = () => {
         try {
-            return typeof document !== "undefined" && document.hidden === true;
+            return typeof document !== "undefined" && (document.hidden === true || !isCompanyPageUrl());
         } catch {
             return false;
         }
     };
     const injectedTornApiKey = () => {
         const key = String(PDA_INJECTED_TORN_KEY || "").trim();
-        return key.includes("###PDA-APIKEY###") ? "" : key;
+        return key.startsWith("###") && key.endsWith("###") ? "" : key;
     };
     const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
     const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const canonicalName = (value) => String(value || "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+    const migratePositionAliases = (settings = {}) => {
+        if (!isObject(settings)) return {};
+        const migrateAssignments = (assignments) => Object.fromEntries(Object.entries(isObject(assignments) ? assignments : {}).map(([key, value]) => [
+            key,
+            isObject(value) ? migrateAssignments(value) : typeof value === "string" ? normalizedPositionName(value) : value
+        ]));
+        const migrateCapacities = (capacities) => Object.fromEntries(Object.entries(isObject(capacities) ? capacities : {}).map(([companyId, positions]) => {
+            if (!isObject(positions)) return [companyId, positions];
+            const migrated = {};
+            Object.entries(positions).forEach(([position, limit]) => {
+                const normalized = normalizedPositionName(position);
+                if (!hasOwn(migrated, normalized) || position === normalized) migrated[normalized] = limit;
+            });
+            return [companyId, migrated];
+        }));
+        const migratePriorities = (priorities) => Object.fromEntries(Object.entries(isObject(priorities) ? priorities : {}).map(([companyId, positions]) => [
+            companyId,
+            Array.isArray(positions) ? [...new Set(positions.map(normalizedPositionName))] : positions
+        ]));
+        return {
+            ...settings,
+            ...(hasOwn(settings, "assignments") ? { assignments: migrateAssignments(settings.assignments) } : {}),
+            ...(hasOwn(settings, "positionCapacities") ? { positionCapacities: migrateCapacities(settings.positionCapacities) } : {}),
+            ...(hasOwn(settings, "positionPriority") ? { positionPriority: migratePriorities(settings.positionPriority) } : {})
+        };
+    };
     const positionRequirementsFor = (companyType, position) => {
         const typeName = Object.keys(POSITION_REQUIREMENTS).find((name) => canonicalName(name) === canonicalName(companyType));
         const roles = typeName ? POSITION_REQUIREMENTS[typeName] : null;
@@ -322,6 +371,34 @@
         }
         return accounts;
     };
+    const persistenceRevision = (settings) => Math.max(0, Math.trunc(asNumber(settings?.persistenceRevision)));
+    const reconcilePersistedSettings = (preferredRaw, fallbackRaw, timestamp = Date.now()) => {
+        const preferred = isObject(preferredRaw) ? preferredRaw : null;
+        const fallback = isObject(fallbackRaw) ? fallbackRaw : null;
+        if (!preferred && !fallback) return null;
+        const preferredRevision = persistenceRevision(preferred);
+        const fallbackRevision = persistenceRevision(fallback);
+        if (preferredRevision || fallbackRevision) {
+            return deepMergeSettings(fallbackRevision > preferredRevision ? fallback : preferred || fallback);
+        }
+        const preferredAccounts = companyAccountMap(preferred || {});
+        const fallbackAccounts = companyAccountMap(fallback || {});
+        const companyAccounts = { ...fallbackAccounts };
+        Object.entries(preferredAccounts).forEach(([id, account]) => {
+            const older = fallbackAccounts[id];
+            companyAccounts[id] = normalizeAccount({
+                ...older,
+                ...account,
+                key: account.source === "saved" && !account.key && older?.source === "saved" ? older.key : account.key
+            }, id);
+        });
+        return deepMergeSettings({
+            ...(fallback || {}),
+            ...(preferred || {}),
+            companyAccounts,
+            persistenceRevision: Math.max(1, Math.trunc(asNumber(timestamp)))
+        });
+    };
     const activeCompanyId = () => normalizeCompanyId(state.settings.activeCompanyId)
         || normalizeCompanyId(state.data?.profile?.id)
         || Object.keys(state.cacheByCompany)[0]
@@ -329,7 +406,25 @@
         || "";
     const accountForCompany = (companyId = activeCompanyId()) => companyAccountMap(state.settings)[normalizeCompanyId(companyId)] || null;
     const accountKey = (account) => account?.source === "pda" ? injectedTornApiKey() : String(account?.key || "").trim();
-    const activeTornApiKey = () => accountKey(accountForCompany()) || injectedTornApiKey();
+    const needsInjectedPrimaryDiscovery = (settings = state.settings, injectedKey = injectedTornApiKey()) => Boolean(injectedKey)
+        && !Object.values(companyAccountMap(settings)).some((account) => account.source === "pda");
+    const primaryDirectorKeyStatus = (settings = state.settings, injectedKey = injectedTornApiKey()) => {
+        const accounts = companyAccountMap(settings);
+        const injectedAccount = Object.values(accounts).find((account) => account.source === "pda") || null;
+        const id = injectedAccount?.id || normalizeCompanyId(settings?.primaryCompanyId) || normalizeCompanyId(settings?.activeCompanyId) || Object.keys(accounts)[0] || "";
+        const account = injectedAccount || accounts[id] || null;
+        if (account?.source === "pda" && injectedKey) return { id: account.id, name: account.name, source: "pda", label: "TornPDA injected key", available: true };
+        if (account?.source !== "pda" && String(account?.key || "").trim()) return { id: account.id, name: account.name, source: "custom", label: "Custom saved Director key", available: true };
+        if (!account && injectedKey) return { id: "", name: "Primary company (detecting…)", source: "pda", label: "TornPDA injected key", available: true };
+        return { id, name: account?.name || "Primary company", source: "none", label: "No usable key", available: false };
+    };
+    const activeTornApiKey = () => {
+        const activeId = activeCompanyId();
+        const account = accountForCompany(activeId);
+        // The injected key belongs only to TornPDA's primary company. A saved
+        // secondary profile must never silently fall back to that different key.
+        return account ? accountKey(account) : activeId ? "" : injectedTornApiKey();
+    };
     const hasTornApiKey = () => Boolean(activeTornApiKey());
     const selectableCompanyOptions = (accounts, activeId = "", transientProfile = null) => {
         const normalized = Object.values(accounts || {}).map((account) => normalizeAccount(account)).filter(Boolean);
@@ -357,17 +452,22 @@
         return String(a ?? "").localeCompare(String(b ?? ""), undefined, { numeric: true }) * (dir === "asc" ? 1 : -1);
     });
     const deepMergeSettings = (raw) => {
+        const source = migratePositionAliases(isObject(raw) ? raw : {});
+        const companyAccounts = companyAccountMap(source);
+        const injectedPrimary = Object.values(companyAccounts).find((account) => account.source === "pda")?.id || "";
         const merged = {
             ...DEFAULT_SETTINGS,
-            ...(isObject(raw) ? raw : {}),
-            companyAccounts: companyAccountMap(raw),
-            activeCompanyId: normalizeCompanyId(raw?.activeCompanyId),
-            dailyAlertMode: ["off", "combined", "separate", "selected"].includes(raw?.dailyAlertMode) ? raw.dailyAlertMode : "off",
-            sourceTimes: isObject(raw?.sourceTimes) ? raw.sourceTimes : {},
-            assignments: isObject(raw?.assignments) ? raw.assignments : {},
-            lockedEmployees: isObject(raw?.lockedEmployees) ? raw.lockedEmployees : {},
-            positionCapacities: isObject(raw?.positionCapacities) ? raw.positionCapacities : {},
-            positionPriority: isObject(raw?.positionPriority) ? raw.positionPriority : {}
+            ...source,
+            companyAccounts,
+            activeCompanyId: normalizeCompanyId(source.activeCompanyId),
+            primaryCompanyId: injectedPrimary || normalizeCompanyId(source.primaryCompanyId) || normalizeCompanyId(source.activeCompanyId) || Object.keys(companyAccounts)[0] || "",
+            persistenceRevision: persistenceRevision(source),
+            dailyAlertMode: ["off", "combined", "separate", "selected"].includes(source.dailyAlertMode) ? source.dailyAlertMode : "off",
+            sourceTimes: isObject(source.sourceTimes) ? source.sourceTimes : {},
+            assignments: isObject(source.assignments) ? source.assignments : {},
+            lockedEmployees: isObject(source.lockedEmployees) ? source.lockedEmployees : {},
+            positionCapacities: isObject(source.positionCapacities) ? source.positionCapacities : {},
+            positionPriority: isObject(source.positionPriority) ? source.positionPriority : {}
         };
         // Legacy flat keys are only read once while building a validated Company-ID account.
         delete merged.tornKey;
@@ -440,11 +540,13 @@
             if (hasOwn(settings, key) && typeof settings[key] !== "boolean") backupValidationError(`invalid ${key} setting`);
         });
         if (hasOwn(settings, "autoRefreshMinutes") && (!Number.isFinite(Number(settings.autoRefreshMinutes)) || Number(settings.autoRefreshMinutes) < 2 || Number(settings.autoRefreshMinutes) > 120)) backupValidationError("invalid automatic refresh setting");
+        if (hasOwn(settings, "persistenceRevision") && (!Number.isFinite(Number(settings.persistenceRevision)) || Number(settings.persistenceRevision) < 0)) backupValidationError("invalid persistence revision");
         if (hasOwn(settings, "activeTab") && typeof settings.activeTab !== "string") backupValidationError("invalid active-tab setting");
         ["assignments", "lockedEmployees", "positionCapacities", "positionPriority", "companyAccounts", "sourceTimes"].forEach((key) => {
             if (hasOwn(settings, key) && !isObject(settings[key])) backupValidationError(`invalid ${key} setting`);
         });
         if (hasOwn(settings, "activeCompanyId") && typeof settings.activeCompanyId !== "string") backupValidationError("invalid active-company setting");
+        if (hasOwn(settings, "primaryCompanyId") && typeof settings.primaryCompanyId !== "string") backupValidationError("invalid primary-company setting");
         if (hasOwn(settings, "dailyAlertMode") && !["off", "combined", "separate", "selected"].includes(settings.dailyAlertMode)) backupValidationError("invalid alert-mode setting");
         const accounts = isObject(settings.companyAccounts) ? settings.companyAccounts : {};
         const nestedKeyPresent = Object.values(accounts).some((account) => isObject(account) && typeof account.key === "string" && account.key.length > 0);
@@ -749,6 +851,16 @@
         if (storage.mode === "pda" && storage.pda) {
             try {
                 await storage.pda.setMany(next);
+                if (hasOwn(next, STORE.settings)) {
+                    try {
+                        // Settings are small and contain the manually supplied secondary
+                        // keys. Keep a recovery mirror so a partial/changed native
+                        // namespace can be reconciled without touching cache or history.
+                        await legacySet(STORE.settings, next[STORE.settings]);
+                    } catch (error) {
+                        warningLog("storage:settings mirror failed", { reason: safeDiagnosticError(error) });
+                    }
+                }
                 Object.keys(next).forEach((key) => storage.fallbackKeys.delete(key));
                 await persistFallbackKeys();
                 if (!storage.fallbackKeys.size) state.storageWarning = "";
@@ -781,6 +893,15 @@
         const entries = Object.entries(values).filter(([key]) => STORE_KEYS.includes(key));
         if (!entries.length) return Promise.resolve();
         const next = Object.fromEntries(entries);
+        if (hasOwn(next, STORE.settings) && isObject(next[STORE.settings])) {
+            const stampedSettings = deepMergeSettings({
+                ...next[STORE.settings],
+                persistenceRevision: Math.max(Date.now(), persistenceRevision(next[STORE.settings]) + 1)
+            });
+            next[STORE.settings] = stampedSettings;
+            values[STORE.settings] = stampedSettings;
+            state.settings = stampedSettings;
+        }
         Object.assign(storage.cache, next);
         return storageWriter.setMany(next, { immediate });
     }
@@ -920,12 +1041,20 @@
                     }
                 }
             });
+            const reconciledSettings = reconcilePersistedSettings(pdaValues[STORE.settings], legacyValues[STORE.settings]);
+            if (reconciledSettings) {
+                storage.cache[STORE.settings] = reconciledSettings;
+                if (JSON.stringify(pdaValues[STORE.settings]) !== JSON.stringify(reconciledSettings)) {
+                    migrations[STORE.settings] = reconciledSettings;
+                }
+            }
             storage.pda = pda;
             storage.mode = "pda";
             storage.initialized = true;
             if (Object.keys(migrations).length) {
                 try {
                     await pda.setMany(migrations);
+                    if (hasOwn(migrations, STORE.settings)) await legacySet(STORE.settings, migrations[STORE.settings]);
                     Object.keys(migrations).forEach((key) => storage.fallbackKeys.delete(key));
                     await persistFallbackKeys();
                 } catch (error) {
@@ -1282,6 +1411,34 @@
         return `${source}: ${error.error || error.message || error.code || "request failed"}`;
     }
 
+    function apiErrorCode(payload) {
+        const error = payload?.error || payload?.errors;
+        const code = typeof error === "object" && error !== null ? Number(error.code) : NaN;
+        return Number.isFinite(code) ? code : null;
+    }
+
+    function requiresDirectorKey(error) {
+        const code = Number(error?.apiCode);
+        if ([1, 2, 10, 13, 16, 18].includes(code)) return true;
+        return /incorrect key|key is empty|access level.+not high enough|permission.+access|key.+(?:paused|disabled)/i.test(String(error?.message || error || ""));
+    }
+
+    function tornPdaKeyFailureMessage(error) {
+        return Number(error?.apiCode) === 16 || /access level|permission/i.test(String(error?.message || ""))
+            ? "TornPDA’s API key does not have the required Company Employees access. Add a Limited-access Director key in Settings."
+            : "TornPDA’s API key is unavailable or invalid. Add a Limited-access Director key in Settings.";
+    }
+
+    function responseBodyText(response) {
+        if (typeof response === "string") return response;
+        const candidates = [response?.responseText, response?.response, response?.body];
+        for (const candidate of candidates) {
+            if (typeof candidate === "string" && candidate.trim()) return candidate;
+            if (candidate !== null && typeof candidate === "object") return JSON.stringify(candidate);
+        }
+        return typeof response?.responseText === "string" ? response.responseText : JSON.stringify(response ?? "");
+    }
+
     function gmTextRequest({ url, headers = {}, method = "GET", timeout = 30000 }) {
         return new Promise((resolve, reject) => {
             const request = safeRequestDescriptor(url, method);
@@ -1299,7 +1456,7 @@
                 if (settled) return;
                 const status = Number(response?.status ?? 200);
                 if (status >= 200 && status < 300) {
-                    const body = typeof response === "string" ? response : (response?.responseText ?? JSON.stringify(response?.body ?? response));
+                    const body = responseBodyText(response);
                     settled = true;
                     debugLog("api:success", { ...request, transport, status, durationMs: durationMs() });
                     resolve(body);
@@ -1363,11 +1520,23 @@
     }
 
     async function jsonRequest(options, source) {
-        const raw = await gmTextRequest(options);
         let payload;
-        try {
-            payload = JSON.parse(raw);
-        } catch {
+        let parseFailure = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            const raw = await gmTextRequest(options);
+            try {
+                payload = JSON.parse(raw);
+                parseFailure = null;
+                break;
+            } catch (error) {
+                parseFailure = error;
+                if (attempt === 0) {
+                    warningLog("api:invalid JSON retry", { ...safeRequestDescriptor(options?.url, options?.method), source });
+                    await sleep(250);
+                }
+            }
+        }
+        if (parseFailure) {
             const error = new Error(`${source}: Invalid JSON response.`);
             errorLog("api:payload failure", { ...safeRequestDescriptor(options?.url, options?.method), source, reason: safeDiagnosticError(error) });
             throw error;
@@ -1375,6 +1544,7 @@
         const error = apiError(payload, source);
         if (error) {
             const failure = new Error(error);
+            failure.apiCode = apiErrorCode(payload);
             errorLog("api:payload failure", { ...safeRequestDescriptor(options?.url, options?.method), source, reason: safeDiagnosticError(failure) });
             throw failure;
         }
@@ -1884,7 +2054,8 @@
         const period = asFinite(entry.period);
         if (period !== null) {
             const periodDate = new Date(period);
-            if (periodDate.getUTCHours() === DAILY_TICK_HOUR_UTC && (periodDate.getUTCMinutes() === 5 || periodDate.getUTCMinutes() === DAILY_SYNC_MINUTE_UTC)) {
+            // Preserve the UTC date encoded by every historical Company reporting boundary.
+            if (periodDate.getUTCHours() === DAILY_TICK_HOUR_UTC && [0, 5, DAILY_SYNC_MINUTE_UTC].includes(periodDate.getUTCMinutes())) {
                 return utcDayKey(period);
             }
         }
@@ -1947,9 +2118,9 @@
         const profile = data?.profile;
         if (!profile?.id) return;
         const id = String(profile.id);
-        const period = reportingPeriod();
-        const reportingDay = dailySyncDay();
-        const capturedAt = Date.now();
+        const capturedAt = asFinite(data?.fetchedAt) ?? Date.now();
+        const period = reportingPeriod(capturedAt);
+        const reportingDay = dailySyncDay(capturedAt);
         const history = companyHistory(id);
         const priorSnapshots = history.filter((entry) => historySnapshotDay(entry, period) === reportingDay);
         const existingSnapshot = priorSnapshots.sort((left, right) => historySnapshotTimestamp(left) - historySnapshotTimestamp(right)).reduce((merged, entry) => merged ? mergeHistorySnapshot(merged, entry) : entry, null);
@@ -2281,11 +2452,25 @@
             tornWithKey(key, "/company/news", { cat: "funds", limit: 100, sort: "DESC" }),
             tornWithKey(key, "/company/applications")
         ]);
-        if (profileResult.status !== "fulfilled") throw new Error(profileResult.reason?.message || "Unable to load company profile.");
+        if (profileResult.status !== "fulfilled") {
+            if (account?.source === "pda" && requiresDirectorKey(profileResult.reason)) {
+                const failure = new Error(tornPdaKeyFailureMessage(profileResult.reason));
+                failure.requiresDirectorKey = true;
+                failure.apiCode = profileResult.reason?.apiCode ?? null;
+                throw failure;
+            }
+            throw new Error(profileResult.reason?.message || "Unable to load company profile.");
+        }
         const profile = unwrap(profileResult.value, "profile", {});
         const id = normalizeCompanyId(profile?.id);
         if (!id) throw new Error("Torn did not return a company profile for this Director key.");
         if (account?.id && normalizeCompanyId(account.id) !== id) throw new Error("This Director key resolves to a different company and was not saved.");
+        if (account?.source === "pda" && employeesResult.status !== "fulfilled" && requiresDirectorKey(employeesResult.reason)) {
+            const failure = new Error(tornPdaKeyFailureMessage(employeesResult.reason));
+            failure.requiresDirectorKey = true;
+            failure.apiCode = employeesResult.reason?.apiCode ?? null;
+            throw failure;
+        }
         const resultValue = (result, property, fallback) => result.status === "fulfilled" ? unwrap(result.value, property, fallback) : fallback;
         const now = Date.now();
         const messages = [];
@@ -2328,7 +2513,8 @@
         const id = snapshot.id;
         const accounts = companyAccountMap(state.settings);
         accounts[id] = snapshot.account;
-        state.settings = deepMergeSettings({ ...state.settings, companyAccounts: accounts, activeCompanyId: state.settings.activeCompanyId || id });
+        const primaryCompanyId = snapshot.account?.source === "pda" ? id : state.settings.primaryCompanyId || state.settings.activeCompanyId || id;
+        state.settings = deepMergeSettings({ ...state.settings, companyAccounts: accounts, activeCompanyId: state.settings.activeCompanyId || id, primaryCompanyId });
         const companySourceTimes = { ...(state.settings.sourceTimes?.[id] || {}), ...snapshot.sourceTimes };
         snapshot.unavailableSources?.forEach((source) => { delete companySourceTimes[source]; });
         state.settings.sourceTimes = {
@@ -2341,6 +2527,23 @@
         state.settings.sourceTimes[id].history = Date.now();
         if (persist) await storeSetMany({ [STORE.settings]: state.settings, [STORE.cache]: cacheEnvelope(), [STORE.history]: state.history });
         return snapshot.data;
+    }
+
+    async function ensureInjectedPrimaryAccount({ persist = true } = {}) {
+        const accounts = companyAccountMap(state.settings);
+        const existing = Object.values(accounts).find((account) => account.source === "pda") || null;
+        if (existing || !needsInjectedPrimaryDiscovery(state.settings)) return existing;
+        const selectedId = activeCompanyId();
+        const snapshot = await fetchCompanySnapshot({ id: "", key: "", source: "pda" });
+        await commitCompanySnapshot(snapshot, { persist: false });
+        if (selectedId && selectedId !== snapshot.id) {
+            state.settings = deepMergeSettings({ ...state.settings, activeCompanyId: selectedId });
+            if (state.cacheByCompany[selectedId]) activateCompanySnapshot(selectedId);
+            else { state.data = null; state.cache = null; }
+        }
+        if (persist) await storeSetMany({ [STORE.settings]: state.settings, [STORE.cache]: cacheEnvelope(), [STORE.history]: state.history }, { immediate: true });
+        debugLog("primary-key:injected account bound", { companyId: snapshot.id });
+        return snapshot.account;
     }
 
     async function refreshCore({ silent = false, suppressDailyAlerts = false, scheduled = false, accountId = activeCompanyId(), background = false, persist = true } = {}) {
@@ -2661,6 +2864,7 @@
                 applyLayout();
             });
         };
+        responsiveLayoutRuntime.update = update;
         responsiveLayoutRuntime.observer = new ResizeObserver(update);
         responsiveLayoutRuntime.observer.observe(el);
         window.visualViewport?.addEventListener("resize", update, { passive: true });
@@ -3631,15 +3835,19 @@
         const panelRect = panel()?.getBoundingClientRect();
         const runtime = nativeRuntime.isTornPDA ? "TornPDA (native confirmed)" : tornPdaUserAgent(currentUserAgent()) ? "TornPDA (native confirmation pending)" : "Desktop / Tampermonkey";
         const screenSize = `${formatNumber(viewport.width)} × ${formatNumber(viewport.height)} visible${panelRect ? ` · panel ${formatNumber(Math.round(panelRect.width))} × ${formatNumber(Math.round(panelRect.height))}` : ""}`;
-        const accountRows = Object.values(accounts).sort((left, right) => left.name.localeCompare(right.name)).map((account) => {
+        const primaryKey = primaryDirectorKeyStatus(settings);
+        const primaryAccount = primaryKey.id ? accounts[primaryKey.id] : null;
+        const primaryActions = primaryAccount ? `<br><button class="ncc-button" data-action="select-company" data-company-id="${escapeHtml(primaryAccount.id)}">Open</button>${primaryKey.source === "custom" ? ` <button class="ncc-button ncc-danger" data-action="remove-company" data-company-id="${escapeHtml(primaryAccount.id)}">Remove</button>` : ""}` : "";
+        const primaryKeySummary = `<div class="ncc-kv"><span><b>Primary Director key</b><br><small>${escapeHtml(primaryKey.name)}${primaryKey.id ? ` · ID ${formatNumber(primaryKey.id)}` : ""}</small></span><span class="${primaryKey.available ? "ncc-good" : "ncc-bad"}"><b>${escapeHtml(primaryKey.label)}</b><br><small>Key value remains hidden</small>${primaryActions}</span></div>`;
+        const accountRows = Object.values(accounts).filter((account) => account.id !== primaryKey.id).sort((left, right) => left.name.localeCompare(right.name)).map((account) => {
             const keyState = account.source === "pda" ? "TornPDA injected" : accountKey(account) ? "Director key saved" : "Director key missing — add again";
-            return `<div class="ncc-kv"><span><b>${escapeHtml(account.name)}</b><br><small>${escapeHtml(account.typeName || "Company")} · ID ${formatNumber(account.id)}</small></span><span>${account.id === activeCompanyId() ? "Current · " : ""}${keyState}<br><button class="ncc-button" data-action="select-company" data-company-id="${escapeHtml(account.id)}">Open</button> <button class="ncc-button ncc-danger" data-action="remove-company" data-company-id="${escapeHtml(account.id)}">Remove</button></span></div>`;
-        }).join("") || `<div class="ncc-notice">No saved Director-key company profile yet. Add one below, or refresh with TornPDA’s injected key.</div>`;
-        const accountsSection = section("Company Director keys", `${accountRows}<div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="open-company-account">Add company…</button><button class="ncc-button" data-action="refresh-all-companies">Sync saved companies now</button></div><p class="ncc-note">Each Limited-access Director key is validated against its own Company ID before it is saved. Saved keys are never rendered, logged, exported by default, or stored in TornPDA injected-key form.</p>`);
+            return `<div class="ncc-kv"><span><b>${escapeHtml(account.name)}</b><br><small>${escapeHtml(account.typeName || "Company")} · ID ${formatNumber(account.id)}</small></span><span>Secondary${account.id === activeCompanyId() ? " · Current" : ""} · ${keyState}<br><button class="ncc-button" data-action="select-company" data-company-id="${escapeHtml(account.id)}">Open</button> <button class="ncc-button ncc-danger" data-action="remove-company" data-company-id="${escapeHtml(account.id)}">Remove</button></span></div>`;
+        }).join("") || `<div class="ncc-notice">No secondary Director key is saved.</div>`;
+        const accountsSection = section("Company Director keys", `${primaryKeySummary}<div class="ncc-label" style="margin-top:10px">Secondary company keys</div>${accountRows}<div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="open-company-account">Add company…</button><button class="ncc-button" data-action="refresh-all-companies">Sync saved companies now</button></div><p class="ncc-note">TornPDA automatically supplies its default or dedicated userscript key for your primary company. Add a Limited-access Director key only for another company, or when the injected key is missing or lacks Company Employees access. Desktop/Tampermonkey continues to use a manually entered key. Every manual key is validated against its own Company ID before it is saved and is never rendered, logged, or exported by default.</p>`);
         const runtimeStorage = section("Runtime & storage", `<div class="ncc-kv"><span>Runtime</span><span>${escapeHtml(runtime)} · ${escapeHtml(state.runtimeKind)}</span></div><div class="ncc-kv"><span>Layout profile</span><span>${escapeHtml(state.layoutProfile)}</span></div><div class="ncc-kv"><span>Current screen size</span><span>${escapeHtml(screenSize)}</span></div><div class="ncc-kv"><span>Storage method</span><span>${escapeHtml(storageMethodLabel())}</span></div><label class="ncc-check" style="margin-top:10px"><input id="ncc-use-legacy-gm-storage" type="checkbox" ${settings.useLegacyGMStorage ? "checked" : ""}><span><b>Use legacy GM storage</b><br>Unchecked keeps TornPDA <code>PDA_storage</code> primary when available, with compatible GM/local fallback.</span></label>`);
         const alertModeOptions = [["off", "Off"], ["combined", "Combined all-company alert"], ["separate", "Separate alert for every company"], ["selected", "Selected company only"]].map(([value, label]) => `<option value="${value}" ${settings.dailyAlertMode === value ? "selected" : ""}>${label}</option>`).join("");
         const dailyAlertSettings = section("Daily Company alerts", `<label><span class="ncc-label">Alert scope at 18:10 UTC</span><select id="ncc-daily-alert-mode" class="ncc-select" style="width:100%;margin-top:6px">${alertModeOptions}</select></label><div class="ncc-grid ncc-grid-2" style="margin-top:10px"><label class="ncc-check"><input id="ncc-daily-tick-toasts" type="checkbox" ${settings.dailyTickToasts ? "checked" : ""}><span><b>Show daily-tick toasts</b><br>Daily Income, Daily Profit, Customer Count, Star Level, stock change, and employee-risk details remain fully visible.</span></label><label class="ncc-check"><input id="ncc-daily-tick-notifications" type="checkbox" ${settings.dailyTickNotifications ? "checked" : ""}><span><b>Show daily-tick notifications</b><br>TornPDA receives one native 18:10 reminder to open the Companion for its all-company sync.</span></label></div><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save daily alert choices</button></div>`);
-        const backupRestore = section("Backup & restore", `<label class="ncc-check"><input id="ncc-backup-include-keys" type="checkbox"><span><b>Include saved Director keys in this backup</b><br>Unchecked by default. Keys are never displayed, logged, or included unless selected for this single download.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="download-company-backup">Download local Company backup</button><button class="ncc-button" data-action="choose-company-backup">Choose backup JSON to restore</button><input id="ncc-company-backup-file" type="file" accept="application/json,.json" style="display:none"></div><p class="ncc-note">Backups include separate company snapshots, history, rankings, planner data, layout, settings, daily-sync state, and alerts. API keys stay out unless you opt in both when creating and restoring a key-containing backup.</p>`);
+        const backupRestore = section("Backup & restore", `<label class="ncc-check"><input id="ncc-backup-include-keys" type="checkbox"><span><b>Include saved Director keys in this backup</b><br>Unchecked by default. Keys are never displayed, logged, or included unless selected for this single export.</span></label><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-company-backup">Save Backup</button><button class="ncc-button" data-action="choose-company-backup">Restore from device or Google Drive…</button><input id="ncc-company-backup-file" type="file" accept=".json,application/json,text/json,text/plain" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none"></div><p class="ncc-note">Desktop and ordinary mobile browsers save or download backups normally. TornPDA routes the same <b>Save Backup</b> button through its documented native <code>shareFile({ base64Data, fileName })</code> handler; select Google Drive in the share sheet to store the backup there. Restore opens the Android/iOS document picker, where local storage, Google Drive, iCloud Drive, and other installed document providers can be selected. Backups include separate company snapshots, history, rankings, planner data, layout, settings, daily-sync state, and alerts. API keys stay out unless you opt in both when creating and restoring a key-containing backup.</p>`);
         return `${dataNotice()}${accountsSection}${section("Local calculation & refresh", `<div class="ncc-grid ncc-grid-2"><label class="ncc-check"><input id="ncc-stock-cost" type="checkbox" ${settings.includeStockCost ? "checked" : ""}><span><b>Include sold stock cost in daily Profit.</b><br>Daily Profit subtracts sold stock cost, ads, and wages when all required data is available.</span></label><label><span class="ncc-label">Automatic foreground refresh</span><div class="ncc-inline" style="margin-top:6px"><input id="ncc-refresh-minutes" class="ncc-input" type="number" min="2" max="120" value="${clamp(asNumber(settings.autoRefreshMinutes, 10), 2, 120)}" style="width:85px"><span class="ncc-help">minutes while the page is active</span></div></label></div><p class="ncc-note">Role projections use the bundled local calculator. Employee work stats never leave Torn for an efficiency lookup.</p><div class="ncc-inline" style="margin-top:10px"><button class="ncc-button ncc-primary" data-action="save-settings">Save preferences only</button><button class="ncc-button" data-action="reset-layout">Reset panel position</button></div>`)}${dailyAlertSettings}${runtimeStorage}${backupRestore}${section("Local data", `<div class="ncc-inline"><button class="ncc-button" data-action="export-history" ${companyHistory().length ? "" : "disabled"}>Export history CSV</button><button class="ncc-button ncc-danger" data-action="clear-local-data">Clear companion data</button></div><p class="ncc-note">Clearing Companion data deletes local company snapshots, rankings, plans, history, daily-sync records, and saved Director keys. It cannot change Torn data.</p>`)}<p class="ncc-note">Naughty Company Companion ${VERSION} · TornPDA/Tampermonkey compatible.</p>`;
     }
 
@@ -3754,6 +3962,10 @@
     }
 
     function render() {
+        if (!isCompanyPageUrl()) {
+            teardownShell();
+            return;
+        }
         mountShell();
         const tabs = [
             ["overview", "Overview"], ["team", "Team"], ["planner", "Planner"], ["rankings", "Rankings"], ["stock", "Stock"], ["trends", "Trends"], ["settings", "Settings"]
@@ -3889,7 +4101,33 @@
         document.body.append(anchor);
         anchor.click();
         anchor.remove();
-        URL.revokeObjectURL(url);
+        // TornPDA resolves blob downloads asynchronously in its native WebView
+        // callback, so keep the object URL alive long enough for that fetch.
+        window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+
+    async function saveTextFileToLocalFilesystem(text, fileName, type) {
+        // TornPDA's WebView currently exposes shareFile and a download callback,
+        // but no native ACTION_CREATE_DOCUMENT/save-file handler. Its partial
+        // showSaveFilePicker surface is unreliable and must not be invoked.
+        const tornPdaRuntime = currentRuntimeMode() === "tornpda";
+        if (!tornPdaRuntime && typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: fileName,
+                    types: [{ description: "Naughty Company backup", accept: { "application/json": [".json"] } }]
+                });
+                const writable = await handle.createWritable();
+                await writable.write(new Blob([text], { type }));
+                await writable.close();
+                return { transport: "picker" };
+            } catch (error) {
+                if (error?.name === "AbortError") return { transport: "cancelled" };
+                warningLog("export:save picker fallback", { reason: safeDiagnosticError(error) });
+            }
+        }
+        downloadLocalTextFile(text, fileName, type);
+        return { transport: "download", runtime: tornPdaRuntime ? "tornpda" : "browser" };
     }
 
     function utf8Base64(text) {
@@ -3933,15 +4171,29 @@
         return (await shareTextWithTornPDA(csv, fileName)).shared;
     }
 
-    async function downloadCompanyBackup() {
+    async function exportCompanyBackup(destination = "save") {
         if (state.exportInFlight) return false;
         const includeKeys = document.getElementById("ncc-backup-include-keys")?.checked === true;
         state.exportInFlight = true;
         render();
         try {
             const backup = createCompanyBackupDocument(currentCompanyBackupStores(), { includeApiKeys: includeKeys });
-            const result = await exportTextFile(JSON.stringify(backup, null, 2), backupFileName(), "application/json;charset=utf-8");
-            if (result.transport === "failed") {
+            const text = JSON.stringify(backup, null, 2);
+            const fileName = backupFileName();
+            const useTornPdaShareFile = destination === "share" || currentRuntimeMode() === "tornpda";
+            const result = useTornPdaShareFile
+                ? await shareTextWithTornPDA(text, fileName)
+                : await saveTextFileToLocalFilesystem(text, fileName, "application/json;charset=utf-8");
+            if (useTornPdaShareFile && !result.native) {
+                downloadLocalTextFile(text, fileName, "application/json;charset=utf-8");
+                result.transport = "download";
+            }
+            if (result.transport === "cancelled") {
+                state.status = "Company backup save cancelled.";
+                render();
+                return false;
+            }
+            if (useTornPdaShareFile && result.native && !result.shared) {
                 state.error = result.message || "TornPDA could not open the native share sheet. No backup was exported.";
                 state.status = "Company backup was not exported.";
                 render();
@@ -3949,7 +4201,12 @@
                 return false;
             }
             const detail = includeKeys ? "with opted-in API keys." : "without API keys.";
-            state.status = result.transport === "share" ? "Company backup opened in the TornPDA share sheet " + detail : "Local Company backup downloaded " + detail;
+            state.error = "";
+            state.status = useTornPdaShareFile && result.shared
+                ? "Company backup opened in TornPDA’s native save-or-share sheet " + detail
+                : result.transport === "picker"
+                    ? "Company backup saved to the selected file location " + detail
+                    : "Company backup downloaded " + detail;
             render();
             void showFeedbackToast(state.status, "good", 6);
             return true;
@@ -3957,6 +4214,20 @@
             state.exportInFlight = false;
             render();
         }
+    }
+
+    const saveCompanyBackup = () => exportCompanyBackup("save");
+
+    function openCompanyBackupPicker() {
+        const input = document.getElementById("ncc-company-backup-file");
+        if (!input) return false;
+        try {
+            if (typeof input.showPicker === "function") input.showPicker();
+            else input.click();
+        } catch {
+            input.click();
+        }
+        return true;
     }
 
     function readBackupFileText(file) {
@@ -4196,8 +4467,8 @@
                     case "auto-assign": await autoAssign(); break;
                     case "save-settings": await saveSettingsFromForm(); break;
                     case "verify-refresh": await saveSettingsFromForm(); await refreshCore(); break;
-                    case "download-company-backup": await downloadCompanyBackup(); break;
-                    case "choose-company-backup": document.getElementById("ncc-company-backup-file")?.click(); break;
+                    case "save-company-backup": await saveCompanyBackup(); break;
+                    case "choose-company-backup": openCompanyBackupPicker(); break;
                     case "confirm-backup-restore": await confirmCompanyBackupRestore(); break;
                     case "export-history": await exportHistory(); break;
                     case "reset-history": await resetHistory(); break;
@@ -4276,8 +4547,11 @@
             grip.addEventListener("lostpointercapture", endResize);
         });
         el.addEventListener("pointerup", () => { void persistLayout(); });
-        window.addEventListener("resize", handleRuntimeViewportChange);
-        window.visualViewport?.addEventListener("resize", handleRuntimeViewportChange);
+        if (!lifecycleRuntime.viewportListenersBound) {
+            lifecycleRuntime.viewportListenersBound = true;
+            window.addEventListener("resize", handleRuntimeViewportChange);
+            window.visualViewport?.addEventListener("resize", handleRuntimeViewportChange);
+        }
     }
 
     function resetAutoRefresh() {
@@ -4288,9 +4562,72 @@
         state.autoRefreshId = setInterval(() => { void refreshCore({ silent: true, scheduled: true }); }, minutes * 60 * 1000);
     }
 
+    function stopPageRuntime() {
+        if (state.autoRefreshId) clearInterval(state.autoRefreshId);
+        state.autoRefreshId = null;
+        if (dailySyncRuntime.timerId) clearTimeout(dailySyncRuntime.timerId);
+        dailySyncRuntime.timerId = null;
+    }
+
+    function teardownShell() {
+        const root = typeof document === "undefined" ? null : document.getElementById(ROOT_ID);
+        root?.remove();
+        responsiveLayoutRuntime.observer?.disconnect();
+        responsiveLayoutRuntime.observer = null;
+        if (responsiveLayoutRuntime.frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(responsiveLayoutRuntime.frame);
+        responsiveLayoutRuntime.frame = null;
+        if (responsiveLayoutRuntime.update && typeof window !== "undefined") {
+            window.visualViewport?.removeEventListener("resize", responsiveLayoutRuntime.update);
+            window.visualViewport?.removeEventListener("scroll", responsiveLayoutRuntime.update);
+        }
+        responsiveLayoutRuntime.update = null;
+    }
+
+    function syncPageLifecycle() {
+        if (!lifecycleRuntime.booted || typeof document === "undefined") return;
+        const active = isCompanyPageUrl();
+        const mounted = Boolean(document.getElementById(ROOT_ID));
+        if (active === lifecycleRuntime.active && (active ? mounted : !mounted)) return;
+        lifecycleRuntime.active = active;
+        if (!active) {
+            stopPageRuntime();
+            teardownShell();
+            void persistLayout();
+            void flushStorageWrites();
+            return;
+        }
+        mountShell();
+        render();
+        resetAutoRefresh();
+        resetDailyTickAlerts();
+        resetDailyRankingRefresh();
+    }
+
+    function startPageLifecycleMonitor() {
+        if (lifecycleRuntime.monitorId || typeof window === "undefined") return;
+        lifecycleRuntime.monitorId = window.setInterval(syncPageLifecycle, 250);
+        window.addEventListener("popstate", syncPageLifecycle);
+        window.addEventListener("hashchange", syncPageLifecycle);
+    }
+
     async function boot() {
         await loadPersistedState();
+        lifecycleRuntime.booted = true;
+        lifecycleRuntime.active = isCompanyPageUrl();
+        startPageLifecycleMonitor();
+        if (!lifecycleRuntime.active) return;
         mountShell();
+        let primaryDiscoveryError = null;
+        if (needsInjectedPrimaryDiscovery()) {
+            state.status = "Identifying the primary company for TornPDA’s injected key…";
+            render();
+            try {
+                await ensureInjectedPrimaryAccount();
+            } catch (error) {
+                primaryDiscoveryError = error?.message || "Unable to identify the primary company for TornPDA’s injected key.";
+                warningLog("primary-key:injected discovery failed", { reason: safeDiagnosticError(error) });
+            }
+        }
         const activeAccount = accountForCompany();
         debugLog("startup:ready", {
             version: VERSION,
@@ -4300,7 +4637,10 @@
             tornKeyConfigured: hasTornApiKey(),
             tornKeySource: activeAccount?.source === "pda" ? "TornPDA injected" : accountKey(activeAccount) ? "saved Director profile" : injectedTornApiKey() ? "TornPDA injected" : "none"
         });
-        if (state.data?.fetchedAt) state.status = `Showing cached data from ${timeAgo(state.data.fetchedAt)}.`;
+        if (primaryDiscoveryError) {
+            state.error = primaryDiscoveryError;
+            state.status = "TornPDA’s injected primary key could not be identified.";
+        } else if (state.data?.fetchedAt) state.status = `Showing cached data from ${timeAgo(state.data.fetchedAt)}.`;
         else state.status = hasTornApiKey() ? "Ready to refresh company data." : "Add a Limited-access Director key to begin.";
         resetAutoRefresh();
         resetDailyTickAlerts();
@@ -4335,7 +4675,7 @@
 
     const testApi = {
         reportingPeriod, weekKey, countStars, calculateRankingMetrics, companyRankSummary, financials,
-        roleStatEfficiency, calculateLocalRoleEfficiencies, localRoleTotalEfficiency, applicationStatusSummary,
+        roleStatEfficiency, calculateLocalRoleEfficiencies, localRoleTotalEfficiency, applicationStatusSummary, migratePositionAliases,
         companyAccountMap, selectableCompanyOptions, normalizeCacheByCompany, cacheEnvelope, migrateLegacyCompanyStores,
         dailySyncDay, dailySyncNeedsRun, dailySyncPlan, historySnapshotDay, mergeHistorySnapshot, normalizeHistory, alertTargetsForMode, sourceFreshness, tabFreshnessSummary,
         layoutProfile, runtimeKind, runtimeMode, launcherTapActivates, canStartHeaderDrag,
@@ -4348,9 +4688,9 @@
         isDailyRankingRefreshDue, rankingRefreshedForDailyTick, buildDailyTickAlert,
         employeeEffectivenessRisks, buildEmployeeRiskAlert, nextDailyAlertTimestamp,
         dailyAlertKindAt, dailyAlertKindsAt, nextDailyReminderTimestamp, buildDailyTickReminder,
-        dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError,
-        createStorageAdapter, createCompanyBackupDocument, validateCompanyBackupDocument,
-        materializeCompanyBackupStores, utf8Base64
+        dailyAlertDeliveryChannels, dailyTickAlertsEnabled, safeRequestDescriptor, safeDiagnosticError, responseBodyText, isCompanyPageUrl,
+        createStorageAdapter, reconcilePersistedSettings, createCompanyBackupDocument, validateCompanyBackupDocument,
+        materializeCompanyBackupStores, utf8Base64, injectedTornApiKey, requiresDirectorKey, primaryDirectorKeyStatus, needsInjectedPrimaryDiscovery
     };
     if (typeof module !== "undefined" && module.exports) module.exports = testApi;
     if (typeof window !== "undefined") initializeNativeRuntime();
